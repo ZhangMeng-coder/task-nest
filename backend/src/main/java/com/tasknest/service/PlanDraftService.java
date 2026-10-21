@@ -37,8 +37,8 @@ import java.util.StringJoiner;
 /**
  * 计划表生成、提示词修订与持久化。
  *
- * <p>P3 的计划生成会交给真实模型；当前阶段按 Mock 脚本的 plan 事件生成确定性的
- * Markdown 计划，并允许用自然语言提示做增删步骤，保证原型交互可完整演算。</p>
+ * <p>P3 的规划会话由真实模型生成计划；本类负责兼容入口的确定性草案生成、计划表
+ * Markdown 渲染与持久化，并允许用自然语言提示做增删步骤。</p>
  */
 @Service
 public class PlanDraftService {
@@ -82,6 +82,64 @@ public class PlanDraftService {
         List<String> revisions = input.revisions() == null ? List.of() : List.copyOf(input.revisions());
         return buildDraft(null, input.title().trim(), effectiveGoal, mockScript,
                 List.copyOf(input.rows()), revisions);
+    }
+
+    /** 保存规划会话确认的计划。真实模型计划没有 mockScript。 */
+    public PlanDraftView fromConfirmed(String mockScript,
+                                       String goal,
+                                       String title,
+                                       List<PlanRowView> rows,
+                                       List<String> revisions,
+                                       int revision) {
+        return buildDraft(null, title, goal, mockScript, rows, revisions, revision);
+    }
+
+    /**
+     * 执行期动态重排后更新计划档案：保留已有修订记录，追加本次重排原因并递增版本。
+     * 已取消的任务不再出现在计划表中，其状态由子任务记录保留。
+     */
+    @Transactional
+    public void applyRuntimePlan(String mainTaskId, EventPayload.Plan plan, String reason) {
+        PlanDraftView current = find(mainTaskId);
+        if (current == null || plan == null) {
+            return;
+        }
+        String title = plan.tasks().stream()
+                .filter(task -> task.parentTaskId() == null)
+                .map(EventPayload.PlannedTask::title)
+                .findFirst()
+                .orElse(current.title());
+        List<EventPayload.PlannedTask> children = plan.tasks().stream()
+                .filter(task -> task.parentTaskId() != null)
+                .toList();
+        Map<String, Integer> indexes = new LinkedHashMap<>();
+        for (int index = 0; index < children.size(); index++) {
+            indexes.put(children.get(index).taskId(), index + 1);
+        }
+        List<PlanRowView> rows = new ArrayList<>(children.size());
+        for (EventPayload.PlannedTask child : children) {
+            String output = child.acceptanceCriteria() == null
+                    || child.acceptanceCriteria().isEmpty()
+                    ? "可复核结果" : child.acceptanceCriteria().get(0);
+            rows.add(new PlanRowView(
+                    child.title(),
+                    child.agentName(),
+                    dependencyOf(child.dependsOn(), indexes),
+                    output,
+                    child.taskId(),
+                    child.description(),
+                    child.acceptanceCriteria(),
+                    child.allowedTools(),
+                    child.testCommand()));
+        }
+        List<String> revisions = new ArrayList<>(current.revisions());
+        int revision = plan.revision() == null
+                ? Math.max(1, current.revision()) + 1 : plan.revision();
+        revisions.add("动态重排 revision " + revision + "："
+                + (reason == null || reason.isBlank() ? "主 Agent 调整计划" : reason));
+        PlanDraftView next = buildDraft(mainTaskId, title, current.goal(),
+                current.mockScript(), rows, revisions, revision);
+        save(mainTaskId, next);
     }
 
     public PlanDraftView revise(RevisePlanRequest request) {
@@ -198,7 +256,18 @@ public class PlanDraftService {
                                      String mockScript,
                                      List<PlanRowView> rows,
                                      List<String> revisions) {
-        int version = revisions.size() + 1;
+        return buildDraft(mainTaskId, title, goal, mockScript, rows, revisions,
+                revisions.size() + 1);
+    }
+
+    private PlanDraftView buildDraft(String mainTaskId,
+                                     String title,
+                                     String goal,
+                                     String mockScript,
+                                     List<PlanRowView> rows,
+                                     List<String> revisions,
+                                     int revision) {
+        int version = Math.max(1, revision);
         String markdown = buildMarkdown(title, goal, rows, revisions);
         return new PlanDraftView(
                 mainTaskId,
@@ -208,7 +277,8 @@ public class PlanDraftService {
                 version,
                 markdown,
                 List.copyOf(rows),
-                List.copyOf(revisions));
+                List.copyOf(revisions),
+                version);
     }
 
     private List<PlanRowView> rowsFrom(EventPayload.Plan plan, EventPayload.PlannedTask root) {

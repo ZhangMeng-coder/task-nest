@@ -2,23 +2,35 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import {
   ApiError,
+  apiBase,
+  cancelPlanSession,
+  confirmPlanSession,
   createMainTask,
+  createPlanSession,
   describeError,
   getMainTaskDetail,
+  getPlanSession,
   getSnapshot,
   listMainTasks,
   reviseMainTaskPlan,
+  revisePlanSession,
   submitInput,
+  submitPlanSessionInput,
 } from '@/api/client'
 import { SseClient } from '@/api/sse'
 import {
   parseEventValue,
   type ConnectionState,
   type EventPayloadMap,
+  type GitCheckpointPayload,
   type MainTaskDetail,
   type MainTaskStatus,
   type MainTaskSummary,
   type PlanDraftView,
+  type PlanPayload,
+  type PlanSessionStatus,
+  type PlanSessionView,
+  type ReviewCompletedPayload,
   type RunSnapshot,
   type RunStatus,
   type SubtaskSnapshot,
@@ -26,6 +38,7 @@ import {
   type TaskNestEvent,
   type TaskRef,
   type ToolResultPayload,
+  type WaitingInputPayload,
 } from '@/api/events'
 
 export interface ToolCallView {
@@ -37,6 +50,11 @@ export interface ToolCallView {
   orphan: boolean
 }
 
+export type GitCheckpointView = GitCheckpointPayload & {
+  seq: number
+  timestamp: string
+}
+
 interface BaseNodeView {
   taskId: string
   title: string
@@ -44,11 +62,15 @@ interface BaseNodeView {
   thought: string
   prompts: EventPayloadMap['prompt_assembled'][]
   toolCalls: ToolCallView[]
-  waiting: EventPayloadMap['waiting_input'] | null
+  waiting: WaitingInputPayload | null
   lastDecisionId: string | null
+  lastCustomInput: string | null
   summary: string | null
   error: string | null
   selectedOptionId: string | null
+  review: ReviewCompletedPayload | null
+  reviewAttempt: number | null
+  gitCheckpoints: GitCheckpointView[]
   startedAt: string | null
   completedAt: string | null
 }
@@ -58,6 +80,9 @@ export interface MainNodeView extends BaseNodeView {
   kind: 'MAIN'
   mainTaskId: string
   status: MainTaskStatus
+  planRevision: number | null
+  planReason: string | null
+  planChangedTaskIds: string[]
 }
 
 /** 子任务节点：固定直接挂在主任务下，不再有第三层。 */
@@ -83,7 +108,11 @@ function isTerminalMain(status: MainTaskStatus): boolean {
 }
 
 function isTerminalSubtask(status: SubtaskStatus): boolean {
-  return status === 'SUCCESS' || status === 'FAILED'
+  return status === 'SUCCESS' || status === 'FAILED' || status === 'CANCELLED'
+}
+
+function isTerminalPlanSession(status: PlanSessionStatus | null): boolean {
+  return status === 'CONFIRMED' || status === 'CANCELLED' || status === 'FAILED'
 }
 
 export const useTaskTreeStore = defineStore('taskTree', () => {
@@ -91,6 +120,7 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
   const mainTaskId = ref<string | null>(null)
   const mockScript = ref<string | null>(null)
   const goal = ref<string | null>(null)
+  const workingDir = ref<string | null>(null)
   const runStatus = ref<RunStatus | null>(null)
   const runSummary = ref<string | null>(null)
   const runTerminal = ref(false)
@@ -119,6 +149,26 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
   const recoveryCount = ref(0)
   const parseErrors = ref<ParseErrorEntry[]>([])
 
+  /** 创建前的规划会话：与运行 SSE 完全隔离。 */
+  const planSessionId = ref<string | null>(null)
+  const planningStatus = ref<PlanSessionStatus | null>(null)
+  const planningPlan = ref<PlanPayload | null>(null)
+  const planningWaiting = ref<WaitingInputPayload | null>(null)
+  const planningWaitingTaskId = ref<string | null>(null)
+  const planningEvents = ref<TaskNestEvent[]>([])
+  const planningConnection = ref<ConnectionState>('IDLE')
+  const planningError = ref<string | null>(null)
+  const planningLastSeq = ref(0)
+  const planningLastEventAt = ref<string | null>(null)
+  const planningSeen = ref<Record<string, true>>({})
+  const planningBuffered = ref<Record<number, TaskNestEvent>>({})
+  const planningStarting = ref(false)
+  const planningRevising = ref(false)
+  const planningConfirming = ref(false)
+  const planningCancelling = ref(false)
+  const planningDecisionSubmitting = ref(false)
+  const planningTerminal = computed(() => isTerminalPlanSession(planningStatus.value))
+
   const starting = ref(false)
   const planRevising = ref(false)
   const decisionSubmitting = ref(false)
@@ -134,8 +184,11 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
   const libraryOpen = ref(false)
 
   let sse: SseClient | null = null
+  let planningSse: SseClient | null = null
   let gapTimer: number | null = null
+  let planningGapTimer: number | null = null
   let recoveryPromise: Promise<void> | null = null
+  let planningRecoveryPromise: Promise<void> | null = null
   let parseErrorCounter = 0
   let toolKeyCounter = 0
   let orderCounter = 0
@@ -203,9 +256,13 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
       toolCalls: [],
       waiting: null,
       lastDecisionId: null,
+      lastCustomInput: null,
       summary: null,
       error: null,
       selectedOptionId: null,
+      review: null,
+      reviewAttempt: null,
+      gitCheckpoints: [],
       startedAt: null,
       completedAt: null,
     }
@@ -224,6 +281,9 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
         kind: 'MAIN',
         mainTaskId: mainTaskId.value ?? '',
         status: 'PENDING',
+        planRevision: null,
+        planReason: null,
+        planChangedTaskIds: [],
       }
     }
     if (refValue?.taskId) {
@@ -295,22 +355,42 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     }
   }
 
-  function applyPlan(tasks: EventPayloadMap['plan']['tasks']): void {
+  function applyPlan(payload: PlanPayload, timestamp: string | null = null): void {
+    const tasks = payload.tasks
     const root = tasks.find((task) => task.parentTaskId === null)
     if (!root) {
       return
     }
     tasks.forEach((task) => plannedTaskIds.add(task.taskId))
-    ensureMain(root)
+    const main = ensureMain(root)
+    if (payload.revision !== null) {
+      main.planRevision = payload.revision
+    }
+    main.planReason = payload.reason
+    main.planChangedTaskIds = payload.changedTaskIds ?? []
+    // 动态重排后同步计划页签；首次计划与确认前生成的草稿版本相同，不覆盖。
+    if (
+      plan.value
+      && payload.revision !== null
+      && payload.revision > plan.value.version
+    ) {
+      plan.value = planDraftFromPlan(payload, goal.value, mockScript.value)
+    }
+
+    const directChildren = tasks.filter((task) => task.parentTaskId === root.taskId)
+    const plannedIds = new Set(directChildren.map((task) => task.taskId))
+    // 重排后从计划中消失的 PENDING 任务由后端取消；前端同步投影。
+    for (const node of Object.values(subtaskNodes.value)) {
+      if (!plannedIds.has(node.taskId) && node.status === 'PENDING') {
+        node.status = 'CANCELLED'
+        node.error = '计划已重排，该子任务被取消'
+        node.waiting = null
+        node.completedAt = timestamp
+      }
+    }
+
     let order = 0
-    for (const task of tasks) {
-      if (task.parentTaskId === null) {
-        continue
-      }
-      if (task.parentTaskId !== root.taskId) {
-        // 后端只允许两层；前端同样只渲染直属子任务。
-        continue
-      }
+    for (const task of directChildren) {
       const node = ensureSubtask(task)
       node.order = order
       node.dependsOn = [...task.dependsOn]
@@ -420,6 +500,7 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
       case 'input_received':
         node.waiting = null
         node.lastDecisionId = event.payload.selectedOptionId
+        node.lastCustomInput = event.payload.customInput
         node.selectedOptionId = event.payload.selectedOptionId
         node.status = 'RUNNING'
         decisionSubmitting.value = false
@@ -457,7 +538,7 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
         goal.value = event.payload.goal
         break
       case 'plan':
-        applyPlan(event.payload.tasks)
+        applyPlan(event.payload, event.timestamp)
         break
       case 'task_started':
       case 'waiting_input':
@@ -466,6 +547,45 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
       case 'task_failed':
         applyStatusEvent(event)
         break
+      case 'review_started': {
+        const node = ensureFromEvent(event)
+        if (node) {
+          node.reviewAttempt = event.payload.attempt
+          if (
+            node.kind === 'SUBTASK'
+            && !isTerminalSubtask(node.status)
+          ) {
+            node.status = 'REVIEWING'
+          }
+        }
+        break
+      }
+      case 'review_completed': {
+        const node = ensureFromEvent(event)
+        if (node) {
+          node.review = event.payload
+          node.reviewAttempt = event.payload.attempt
+          if (
+            node.kind === 'SUBTASK'
+            && event.payload.verdict === 'REWORK'
+            && !isTerminalSubtask(node.status)
+          ) {
+            node.status = 'RETRYING'
+          }
+        }
+        break
+      }
+      case 'git_checkpoint': {
+        const node = ensureFromEvent(event)
+        if (node) {
+          node.gitCheckpoints.push({
+            ...event.payload,
+            seq: event.seq,
+            timestamp: event.timestamp,
+          })
+        }
+        break
+      }
       case 'task_thought': {
         const node = ensureFromEvent(event)
         if (node) {
@@ -821,6 +941,48 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     parseErrors.value = [...parseErrors.value.slice(-19), entry]
   }
 
+  function clearPlanningGapTimer(): void {
+    if (planningGapTimer !== null) {
+      window.clearTimeout(planningGapTimer)
+      planningGapTimer = null
+    }
+  }
+
+  function closePlanningConnection(): void {
+    if (planningSse) {
+      const client = planningSse
+      planningSse = null
+      client.close()
+    }
+    clearPlanningGapTimer()
+    planningRecoveryPromise = null
+    if (planningConnection.value !== 'IDLE') {
+      planningConnection.value = 'DISCONNECTED'
+    }
+  }
+
+  /** 清空规划会话状态；不影响运行投影与主任务库。 */
+  function clearPlanningState(): void {
+    closePlanningConnection()
+    planSessionId.value = null
+    planningStatus.value = null
+    planningPlan.value = null
+    planningWaiting.value = null
+    planningWaitingTaskId.value = null
+    planningEvents.value = []
+    planningConnection.value = 'IDLE'
+    planningError.value = null
+    planningLastSeq.value = 0
+    planningLastEventAt.value = null
+    planningSeen.value = {}
+    planningBuffered.value = {}
+    planningStarting.value = false
+    planningRevising.value = false
+    planningConfirming.value = false
+    planningCancelling.value = false
+    planningDecisionSubmitting.value = false
+  }
+
   /** 清掉当前运行/档案的全部投影，但保留主任务库列表。 */
   function clearRunState(): void {
     if (sse) {
@@ -834,6 +996,7 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     mainTaskId.value = null
     mockScript.value = null
     goal.value = null
+    workingDir.value = null
     runStatus.value = null
     runSummary.value = null
     runTerminal.value = false
@@ -870,6 +1033,7 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
 
   function reset(): void {
     clearRunState()
+    clearPlanningState()
     starting.value = false
     archiveMode.value = false
     archiveLoading.value = false
@@ -881,6 +1045,7 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     script: string,
     goalText?: string,
     planDraft?: PlanDraftView | null,
+    workingDirValue?: string | null,
   ): Promise<boolean> {
     if (starting.value) {
       return false
@@ -898,10 +1063,12 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
               revisions: planDraft.revisions,
             }
           : undefined,
+        workingDirValue,
       )
       runId.value = response.runId
       mainTaskId.value = response.mainTaskId
       mockScript.value = response.mockScript
+      workingDir.value = response.workingDir ?? workingDirValue?.trim() ?? null
       plan.value = response.plan
       mainCreatedAt.value = response.createdAt
       mainUpdatedAt.value = response.createdAt
@@ -953,15 +1120,23 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     }
   }
 
-  async function submitDecision(taskId: string, selectedOptionId: string): Promise<void> {
+  async function submitDecision(
+    taskId: string,
+    selectedOptionId: string | null,
+    customInput: string | null = null,
+  ): Promise<void> {
     if (archiveMode.value || !runId.value || decisionSubmitting.value) {
+      return
+    }
+    if (!selectedOptionId && !customInput?.trim()) {
+      decisionError.value = '请选择一个选项或输入自定义内容。'
       return
     }
     decisionSubmitting.value = true
     decisionError.value = null
     const target = runId.value
     try {
-      await submitInput(target, taskId, selectedOptionId)
+      await submitInput(target, taskId, selectedOptionId, customInput)
     } catch (error) {
       decisionSubmitting.value = false
       decisionError.value = describeError(error)
@@ -992,6 +1167,411 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
       client.close()
     }
     clearGapTimer()
+  }
+
+  function applyPlanningView(view: PlanSessionView): void {
+    planningStatus.value = view.status
+    if (view.plan) {
+      planningPlan.value = view.plan
+    }
+    planningError.value = view.error
+  }
+
+  function applyPlanningEvent(event: TaskNestEvent): void {
+    planningLastEventAt.value = event.timestamp
+    switch (event.type) {
+      case 'run_started':
+        goal.value = event.payload.goal
+        break
+      case 'plan':
+        planningPlan.value = event.payload
+        planningStatus.value = 'READY'
+        planningWaiting.value = null
+        planningWaitingTaskId.value = null
+        planningDecisionSubmitting.value = false
+        planningError.value = null
+        break
+      case 'waiting_input':
+        planningWaiting.value = event.payload
+        planningWaitingTaskId.value = event.task?.taskId ?? null
+        planningStatus.value = 'WAITING_INPUT'
+        planningDecisionSubmitting.value = false
+        break
+      case 'input_received':
+        planningWaiting.value = null
+        planningWaitingTaskId.value = null
+        planningStatus.value = 'RUNNING'
+        planningDecisionSubmitting.value = false
+        break
+      case 'run_completed':
+        // 确认与取消都会终结规划 SSE；确认结果由 REST 响应写入 CONFIRMED。
+        if (!planningConfirming.value && !isTerminalPlanSession(planningStatus.value)) {
+          planningStatus.value = 'CANCELLED'
+        }
+        planningWaiting.value = null
+        planningWaitingTaskId.value = null
+        closePlanningConnection()
+        break
+      case 'error':
+        planningStatus.value = 'FAILED'
+        planningError.value = `${event.payload.code} · ${event.payload.message}`
+        planningWaiting.value = null
+        planningWaitingTaskId.value = null
+        closePlanningConnection()
+        break
+      default:
+        break
+    }
+  }
+
+  function recordPlanningEvent(event: TaskNestEvent): void {
+    planningSeen.value[event.eventId] = true
+    applyPlanningEvent(event)
+    planningEvents.value.push(event)
+    planningLastSeq.value = Math.max(planningLastSeq.value, event.seq)
+  }
+
+  function drainPlanningBuffer(): void {
+    let progressed = true
+    while (progressed) {
+      progressed = false
+      const next = planningBuffered.value[planningLastSeq.value + 1]
+      if (!next) {
+        break
+      }
+      delete planningBuffered.value[planningLastSeq.value + 1]
+      progressed = true
+      if (planningSeen.value[next.eventId]) {
+        planningLastSeq.value = Math.max(planningLastSeq.value, next.seq)
+        continue
+      }
+      recordPlanningEvent(next)
+    }
+    if (Object.keys(planningBuffered.value).length === 0) {
+      clearPlanningGapTimer()
+    }
+  }
+
+  function handlePlanningEvent(event: TaskNestEvent): void {
+    const id = planSessionId.value
+    if (!id || event.runId !== id || planningTerminal.value) {
+      return
+    }
+    if (planningSeen.value[event.eventId]) {
+      if (event.seq === planningLastSeq.value + 1) {
+        planningLastSeq.value = event.seq
+        drainPlanningBuffer()
+      } else if (event.seq > planningLastSeq.value + 1) {
+        planningBuffered.value = { ...planningBuffered.value, [event.seq]: event }
+        schedulePlanningGapRecovery()
+      }
+      return
+    }
+    if (event.seq <= planningLastSeq.value) {
+      recordPlanningEvent(event)
+      return
+    }
+    if (event.seq > planningLastSeq.value + 1) {
+      planningBuffered.value = { ...planningBuffered.value, [event.seq]: event }
+      schedulePlanningGapRecovery()
+      return
+    }
+    recordPlanningEvent(event)
+    drainPlanningBuffer()
+  }
+
+  function schedulePlanningGapRecovery(): void {
+    if (
+      planningGapTimer !== null
+      || planningRecoveryPromise !== null
+      || planningTerminal.value
+    ) {
+      return
+    }
+    planningGapTimer = window.setTimeout(() => {
+      planningGapTimer = null
+      void recoverPlanningGap()
+    }, 2_000)
+  }
+
+  async function recoverPlanningGap(): Promise<void> {
+    const id = planSessionId.value
+    if (!id || planningTerminal.value) {
+      return
+    }
+    if (planningRecoveryPromise) {
+      return planningRecoveryPromise
+    }
+    planningRecoveryPromise = (async () => {
+      try {
+        const view = await getPlanSession(id)
+        if (planSessionId.value !== id) {
+          return
+        }
+        applyPlanningView(view)
+      } catch (error) {
+        if (error instanceof ApiError && error.code === 40405) {
+          planningStatus.value = 'FAILED'
+          planningError.value = '规划会话已失效（后端可能已重启），请重新创建。'
+          closePlanningConnection()
+          return
+        }
+        planningError.value = `规划会话恢复失败：${describeError(error)}`
+      } finally {
+        planningRecoveryPromise = null
+      }
+      if (planSessionId.value !== id || planningTerminal.value) {
+        return
+      }
+      planningSse?.restart(planningLastSeq.value)
+    })()
+    return planningRecoveryPromise
+  }
+
+  function connectPlanning(id: string, afterSeq: number): void {
+    closePlanningConnection()
+    const client = new SseClient({
+      runId: id,
+      initialAfterSeq: afterSeq,
+      getAfterSeq: () => planningLastSeq.value,
+      beforeReconnect: async () => {
+        try {
+          const view = await getPlanSession(id)
+          if (planSessionId.value !== id) {
+            return null
+          }
+          applyPlanningView(view)
+          return planningTerminal.value ? null : planningLastSeq.value
+        } catch (error) {
+          if (error instanceof ApiError && error.code === 40405) {
+            planningStatus.value = 'FAILED'
+            planningError.value = '规划会话已失效（后端可能已重启），请重新创建。'
+            return null
+          }
+          planningError.value = `规划会话恢复失败：${describeError(error)}`
+          return planningLastSeq.value
+        }
+      },
+      onEvent: handlePlanningEvent,
+      onStateChange: (state) => {
+        planningConnection.value = state
+      },
+      onParseError: (raw, reason, seq) => {
+        recordParseError(raw, reason)
+        if (seq !== null && seq === planningLastSeq.value + 1 && !planningTerminal.value) {
+          planningLastSeq.value = seq
+          drainPlanningBuffer()
+        }
+      },
+      streamUrl: (after) => (
+        `${apiBase()}/api/main-tasks/plan-sessions/${encodeURIComponent(id)}/events?afterSeq=${after}`
+      ),
+    })
+    planningSse = client
+    client.connect(afterSeq)
+  }
+
+  function planDraftFromPlan(
+    payload: PlanPayload,
+    goalText: string | null,
+    script: string | null,
+  ): PlanDraftView {
+    const root = payload.tasks.find((task) => task.parentTaskId === null)
+    const title = root?.title ?? '软件开发任务'
+    const children = payload.tasks.filter((task) => task.parentTaskId === root?.taskId)
+    const rows = children.map((task) => ({
+      title: task.title,
+      agent: task.agentName,
+      dependency: task.dependsOn.join('、'),
+      output: task.acceptanceCriteria?.[0] ?? task.description ?? '',
+      taskId: task.taskId,
+      description: task.description,
+      acceptanceCriteria: task.acceptanceCriteria,
+      allowedTools: task.allowedTools,
+      testCommand: task.testCommand,
+    }))
+    const escapeCell = (value: string): string => value.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+    const lines = [
+      `# ${title}`,
+      '',
+      goalText ?? '',
+      '',
+      '| 步骤 | 子任务 | Agent | 依赖 | 产出 |',
+      '| --- | --- | --- | --- | --- |',
+      ...rows.map((row, index) => (
+        `| ${index + 1} | ${escapeCell(row.title)} | ${escapeCell(row.agent)} `
+        + `| ${escapeCell(row.dependency || '—')} | ${escapeCell(row.output || '—')} |`
+      )),
+    ]
+    return {
+      mainTaskId: mainTaskId.value,
+      title,
+      goal: goalText ?? '',
+      mockScript: script,
+      version: payload.revision ?? 1,
+      markdown: lines.join('\n'),
+      rows,
+      revisions: payload.reason ? [payload.reason] : [],
+    }
+  }
+
+  async function startPlanning(
+    goalText: string,
+    workingDirValue: string,
+    script?: string | null,
+  ): Promise<boolean> {
+    if (planningStarting.value) {
+      return false
+    }
+    // 规划与已有运行互不影响；确认后才用新运行替换当前投影。
+    clearPlanningState()
+    planningStarting.value = true
+    planningError.value = null
+    try {
+      const response = await createPlanSession(
+        goalText,
+        workingDirValue,
+        script && script.trim().length > 0 ? script.trim() : null,
+      )
+      planSessionId.value = response.planSessionId
+      planningStatus.value = response.status
+      planningConnection.value = 'CONNECTING'
+      goal.value = goalText.trim()
+      workingDir.value = workingDirValue.trim()
+      mockScript.value = script && script.trim().length > 0 ? script.trim() : null
+      planningStarting.value = false
+      // 从 0 开始补发历史，Mock 计划可能在创建响应前就已发布。
+      connectPlanning(response.planSessionId, 0)
+      return true
+    } catch (error) {
+      planningStarting.value = false
+      planningConnection.value = 'IDLE'
+      planningError.value = describeError(error)
+      return false
+    }
+  }
+
+  async function revisePlanning(instruction: string): Promise<boolean> {
+    const id = planSessionId.value
+    const text = instruction.trim()
+    if (!id || !text || planningRevising.value || planningStatus.value !== 'READY') {
+      return false
+    }
+    planningRevising.value = true
+    planningError.value = null
+    try {
+      await revisePlanSession(id, text)
+      planningStatus.value = 'RUNNING'
+      return true
+    } catch (error) {
+      planningError.value = describeError(error)
+      return false
+    } finally {
+      planningRevising.value = false
+    }
+  }
+
+  async function submitPlanningDecision(
+    taskId: string,
+    selectedOptionId: string | null,
+    customInput: string | null = null,
+  ): Promise<void> {
+    const id = planSessionId.value
+    if (!id || planningDecisionSubmitting.value) {
+      return
+    }
+    if (!selectedOptionId && !customInput?.trim()) {
+      planningError.value = '请选择一个选项或输入自定义内容。'
+      return
+    }
+    planningDecisionSubmitting.value = true
+    planningError.value = null
+    try {
+      await submitPlanSessionInput(id, taskId, selectedOptionId, customInput)
+    } catch (error) {
+      planningDecisionSubmitting.value = false
+      planningError.value = describeError(error)
+      if (error instanceof ApiError && error.code === 40901) {
+        void recoverPlanningGap()
+      }
+    }
+  }
+
+  async function confirmPlanning(): Promise<boolean> {
+    const id = planSessionId.value
+    if (!id || planningConfirming.value) {
+      return false
+    }
+    if (planningStatus.value !== 'READY' || !planningPlan.value) {
+      planningError.value = '计划尚未生成完成，不能确认。'
+      return false
+    }
+    planningConfirming.value = true
+    planningError.value = null
+    const plannedPlan = planningPlan.value
+    const goalText = goal.value
+    const script = mockScript.value
+    try {
+      const response = await confirmPlanSession(id)
+      planningStatus.value = 'CONFIRMED'
+      planningWaiting.value = null
+      planningWaitingTaskId.value = null
+      closePlanningConnection()
+
+      clearRunState()
+      archiveMode.value = false
+      runId.value = response.runId
+      mainTaskId.value = response.mainTaskId
+      workingDir.value = response.workingDir
+      goal.value = goalText
+      mockScript.value = script
+      plan.value = planDraftFromPlan(plannedPlan, goalText, script)
+      mainCreatedAt.value = new Date().toISOString()
+      mainUpdatedAt.value = mainCreatedAt.value
+      runStatus.value = 'RUNNING'
+      connection.value = 'CONNECTING'
+
+      const root = plannedPlan.tasks.find((task) => task.parentTaskId === null)
+      if (root) {
+        const main = ensureMain(root)
+        main.planRevision = plannedPlan.revision
+        main.planReason = plannedPlan.reason
+        main.planChangedTaskIds = plannedPlan.changedTaskIds ?? []
+      }
+
+      planningConfirming.value = false
+      connect(response.runId, 0)
+      return true
+    } catch (error) {
+      planningConfirming.value = false
+      planningError.value = describeError(error)
+      if (error instanceof ApiError && error.code === 40405) {
+        planningStatus.value = 'FAILED'
+      }
+      return false
+    }
+  }
+
+  async function cancelPlanning(): Promise<boolean> {
+    const id = planSessionId.value
+    if (!id || planningCancelling.value) {
+      return false
+    }
+    planningCancelling.value = true
+    planningError.value = null
+    try {
+      await cancelPlanSession(id)
+      planningStatus.value = 'CANCELLED'
+      planningWaiting.value = null
+      planningWaitingTaskId.value = null
+      closePlanningConnection()
+      return true
+    } catch (error) {
+      planningError.value = describeError(error)
+      return false
+    } finally {
+      planningCancelling.value = false
+    }
   }
 
   async function loadMainTasks(): Promise<void> {
@@ -1050,6 +1630,7 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     runId.value = summary.runId
     mainTaskId.value = summary.mainTaskId
     mockScript.value = summary.mockScript
+    workingDir.value = summary.workingDir
     goal.value = summary.goal
     plan.value = detail.plan
     planError.value = null
@@ -1101,6 +1682,8 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
         child.waiting = {
           question: subtask.waitingQuestion,
           options: subtask.waitingOptions,
+          allowCustom: true,
+          customPlaceholder: null,
         }
       }
     }
@@ -1149,6 +1732,8 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
         child.waiting = {
           question: subtask.waitingQuestion,
           options: subtask.waitingOptions,
+          allowCustom: true,
+          customPlaceholder: null,
         }
       }
     }
@@ -1176,6 +1761,7 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     mainTaskId,
     mockScript,
     goal,
+    workingDir,
     runStatus,
     runSummary,
     runTerminal,
@@ -1203,6 +1789,22 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     decisionSubmitting,
     decisionError,
     globalError,
+    planSessionId,
+    planningStatus,
+    planningPlan,
+    planningWaiting,
+    planningWaitingTaskId,
+    planningEvents,
+    planningConnection,
+    planningError,
+    planningLastSeq,
+    planningLastEventAt,
+    planningStarting,
+    planningRevising,
+    planningConfirming,
+    planningCancelling,
+    planningDecisionSubmitting,
+    planningTerminal,
     archiveMode,
     archiveLoading,
     archiveError,
@@ -1221,6 +1823,12 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     unknownTaskCount,
     startRun,
     revisePlan,
+    startPlanning,
+    revisePlanning,
+    submitPlanningDecision,
+    confirmPlanning,
+    cancelPlanning,
+    clearPlanningState,
     selectTask,
     toggleCollapse,
     submitDecision,

@@ -45,7 +45,7 @@ public class MainTaskController {
     public ResponseEntity<ApiResponse<CreateMainTaskResponse>> create(
             @Valid @RequestBody CreateMainTaskRequest request) {
         CreateMainTaskResponse response = runService.createMainTask(
-                request.mockScript(), request.goal(), request.plan());
+                request.mockScript(), request.goal(), request.workingDir(), request.plan());
         return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.ok(response));
     }
 

@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { Setting } from '@element-plus/icons-vue'
 
 const props = defineProps<{
   total: number
   active: number
   archiveMode: boolean
+}>()
+
+const emit = defineEmits<{
+  openSettings: []
 }>()
 
 const modeLabel = computed(() => (props.archiveMode ? '只读档案' : '实时工作台'))
@@ -29,6 +34,10 @@ const modeLabel = computed(() => (props.archiveMode ? '只读档案' : '实时�
         <span class="head-stat-label">进行中</span>
       </div>
       <span class="mode-badge mono">{{ modeLabel }}</span>
+      <button type="button" class="settings-trigger" @click="emit('openSettings')">
+        <el-icon><Setting /></el-icon>
+        <span>LLM 设置</span>
+      </button>
     </div>
   </header>
 </template>
@@ -107,6 +116,25 @@ const modeLabel = computed(() => (props.archiveMode ? '只读档案' : '实时�
   color: var(--ledger-dim);
   font-size: 9px;
   letter-spacing: 0.08em;
+}
+
+.settings-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid var(--ledger-line);
+  background: transparent;
+  color: #dfe1d7;
+  font-size: 10px;
+  line-height: 1.5;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.settings-trigger:hover,
+.settings-trigger:focus-visible {
+  border-color: var(--signal);
+  color: var(--signal);
 }
 
 @media (max-width: 820px) {

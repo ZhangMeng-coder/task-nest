@@ -16,6 +16,9 @@ public enum EventType {
     INPUT_RECEIVED("input_received"),
     TASK_COMPLETED("task_completed"),
     TASK_FAILED("task_failed"),
+    REVIEW_STARTED("review_started"),
+    REVIEW_COMPLETED("review_completed"),
+    GIT_CHECKPOINT("git_checkpoint"),
     RUN_COMPLETED("run_completed"),
     ERROR("error"),
     HEARTBEAT("heartbeat");

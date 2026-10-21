@@ -24,11 +24,14 @@ public class TaskProjection {
             case RUN_STARTED -> run.getMainTask().setGoal(((EventPayload.RunStarted) event.payload()).goal());
             case PLAN -> applyPlan(run, (EventPayload.Plan) event.payload());
             case TASK_STARTED -> applyTaskStarted(run, event);
-            case TASK_THOUGHT, PROMPT_ASSEMBLED, TOOL_CALL, TOOL_RESULT -> ensureTask(run, event.task());
+            case TASK_THOUGHT, PROMPT_ASSEMBLED, TOOL_CALL, TOOL_RESULT, GIT_CHECKPOINT ->
+                    ensureTask(run, event.task());
             case WAITING_INPUT -> applyWaiting(run, event);
             case INPUT_RECEIVED -> applyInputReceived(run, event);
             case TASK_COMPLETED -> applyTaskCompleted(run, event);
             case TASK_FAILED -> applyTaskFailed(run, event);
+            case REVIEW_STARTED -> applyReviewStarted(run, event);
+            case REVIEW_COMPLETED -> applyReviewCompleted(run, event);
             case RUN_COMPLETED -> {
                 run.setStatus(RunStatus.COMPLETED);
                 run.setTerminal(true);
@@ -82,8 +85,12 @@ public class TaskProjection {
         main.setTitle(root.title());
         main.setAgentName(root.agentName());
 
+        // 动态重排：保留已有任务节点及其状态，只更新仍在新计划中的 PENDING 任务；
+        // 被移除的 PENDING 任务转为 CANCELLED，已开始/已完成的节点保持原状。
+        Map<String, TaskNodeState> current = new LinkedHashMap<>(run.getSubtasks());
         Map<String, TaskNodeState> next = new LinkedHashMap<>();
         int order = 0;
+        java.util.Set<String> plannedIds = new java.util.LinkedHashSet<>();
         for (EventPayload.PlannedTask planned : plan.tasks()) {
             if (planned.parentTaskId() == null) {
                 continue;
@@ -92,7 +99,10 @@ public class TaskProjection {
                 throw new IllegalStateException(
                         "任务只允许两层：子任务 " + planned.taskId() + " 必须直接挂在主任务下");
             }
-            TaskNodeState node = run.getSubtasks().get(planned.taskId());
+            if (!plannedIds.add(planned.taskId())) {
+                throw new IllegalStateException("plan 中任务 ID 重复: " + planned.taskId());
+            }
+            TaskNodeState node = current.get(planned.taskId());
             if (node == null) {
                 node = new TaskNodeState(
                         planned.taskId(),
@@ -101,17 +111,61 @@ public class TaskProjection {
                         planned.agentName(),
                         order);
             } else {
-                node.setParentTaskId(root.taskId());
-                node.setTitle(planned.title());
-                node.setAgentName(planned.agentName());
-                node.setOrder(order);
+                if (node.getStatus() == SubtaskStatus.PENDING) {
+                    node.setParentTaskId(root.taskId());
+                    node.setTitle(planned.title());
+                    node.setAgentName(planned.agentName());
+                    node.setOrder(order);
+                    node.setDependsOn(new java.util.ArrayList<>(
+                            planned.dependsOn() == null ? List.of() : planned.dependsOn()));
+                }
             }
-            node.setDependsOn(new java.util.ArrayList<>(planned.dependsOn()));
+            if (node.getStatus() == SubtaskStatus.PENDING
+                    && (node.getDependsOn() == null || node.getDependsOn().isEmpty())) {
+                node.setDependsOn(new java.util.ArrayList<>(
+                        planned.dependsOn() == null ? List.of() : planned.dependsOn()));
+            }
             next.put(node.getTaskId(), node);
             order++;
         }
+        for (TaskNodeState existing : current.values()) {
+            if (next.containsKey(existing.getTaskId())) {
+                continue;
+            }
+            if (existing.getStatus() == SubtaskStatus.PENDING) {
+                existing.setStatus(SubtaskStatus.CANCELLED);
+                existing.setError("计划已更新，该待办任务被取消");
+            }
+            next.put(existing.getTaskId(), existing);
+        }
         run.getSubtasks().clear();
         run.getSubtasks().putAll(next);
+    }
+
+    private void applyReviewStarted(RunState run, EventEnvelope event) {
+        TaskRef ref = ensureTask(run, event.task());
+        if (ref == null || isMain(run, ref)) {
+            return;
+        }
+        TaskNodeState node = run.getSubtasks().get(ref.taskId());
+        if (node != null && !node.isTerminal()) {
+            node.setStatus(SubtaskStatus.REVIEWING);
+        }
+    }
+
+    private void applyReviewCompleted(RunState run, EventEnvelope event) {
+        TaskRef ref = ensureTask(run, event.task());
+        if (ref == null || isMain(run, ref)) {
+            return;
+        }
+        TaskNodeState node = run.getSubtasks().get(ref.taskId());
+        if (node == null || node.isTerminal()) {
+            return;
+        }
+        if (event.payload() instanceof EventPayload.ReviewCompleted review
+                && "REWORK".equalsIgnoreCase(review.verdict())) {
+            node.setStatus(SubtaskStatus.RETRYING);
+        }
     }
 
     private void applyTaskStarted(RunState run, EventEnvelope event) {

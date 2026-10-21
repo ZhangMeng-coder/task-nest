@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Document, RefreshLeft } from '@element-plus/icons-vue'
+import { Document, FolderOpened, RefreshLeft } from '@element-plus/icons-vue'
 import { useTaskTreeStore } from '@/stores/taskTree'
 import {
   CONNECTION_LABEL,
@@ -34,10 +34,17 @@ const expanded = ref<string[]>([])
 const main = computed(() => store.mainNode)
 const title = computed(() => main.value?.title ?? props.entry?.title ?? '主任务')
 const goal = computed(() => store.goal ?? props.entry?.goal ?? '')
+const workingDir = computed(() => store.workingDir ?? props.entry?.workingDir ?? null)
 const status = computed(() => main.value?.status ?? props.entry?.status ?? 'PENDING')
 const total = computed(() => store.subtaskCount || props.entry?.subtaskCount || 0)
 const completed = computed(() => store.successCount || props.entry?.completedCount || 0)
-const planVersion = computed(() => store.plan?.version ?? props.entry?.planVersion ?? 0)
+const planVersion = computed(() => (
+  store.mainNode?.planRevision ?? store.plan?.version ?? props.entry?.planVersion ?? 0
+))
+const replanned = computed(() => (
+  (store.mainNode?.planRevision ?? 0) > 1
+    || (store.mainNode?.planChangedTaskIds.length ?? 0) > 0
+))
 const percentage = computed(() => (
   total.value === 0 ? 0 : Math.round((completed.value / total.value) * 100)
 ))
@@ -114,8 +121,12 @@ function dependencyLabel(taskId: string): string {
     : '无依赖'
 }
 
-function decide(taskId: string, optionId: string): void {
-  void store.submitDecision(taskId, optionId)
+function decide(
+  taskId: string,
+  optionId: string | null,
+  customInput: string | null,
+): void {
+  void store.submitDecision(taskId, optionId, customInput)
 }
 
 function leaveArchive(): void {
@@ -168,6 +179,12 @@ function leaveArchive(): void {
           </el-tag>
         </div>
         <p v-if="goal" class="task-goal">{{ goal }}</p>
+        <p class="task-workdir" :class="{ 'is-empty': !workingDir }">
+          <el-icon><FolderOpened /></el-icon>
+          <span class="mono" :title="workingDir ?? undefined">
+            {{ workingDir ?? '未指定工作目录' }}
+          </span>
+        </p>
       </div>
       <div class="task-actions">
         <el-button :icon="Document" @click="emit('openLog')">查询日志</el-button>
@@ -192,6 +209,21 @@ function leaveArchive(): void {
       class="wait-banner"
       title="运行已终止"
       :description="main.error ?? store.runSummary ?? '主任务执行失败。'"
+    />
+
+    <el-alert
+      v-if="replanned"
+      type="info"
+      :closable="false"
+      show-icon
+      class="wait-banner"
+      :title="`计划已动态重排至 v${planVersion}`"
+      :description="[
+        store.mainNode?.planReason ?? '主 Agent 根据执行结果调整了剩余子任务。',
+        store.mainNode?.planChangedTaskIds.length
+          ? `涉及 ${store.mainNode.planChangedTaskIds.length} 个任务；已开始的子任务不受影响。`
+          : '',
+      ].filter(Boolean).join(' ')"
     />
 
     <div class="task-strip">
@@ -269,7 +301,7 @@ function leaveArchive(): void {
               :archive-mode="store.archiveMode"
               :submitting="store.decisionSubmitting"
               :decision-error="node.status === 'WAITING_INPUT' ? store.decisionError : null"
-              @decide="(optionId) => decide(node.taskId, optionId)"
+              @decide="(optionId, customInput) => decide(node.taskId, optionId, customInput)"
             />
           </el-collapse-item>
         </el-collapse>
@@ -371,6 +403,37 @@ function leaveArchive(): void {
   color: var(--ink-soft);
   font-size: 12.5px;
   line-height: 1.65;
+}
+
+.task-workdir {
+  display: flex;
+  max-width: 760px;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.task-workdir .el-icon {
+  flex: 0 0 auto;
+  color: var(--signal-deep);
+}
+
+.task-workdir span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-workdir.is-empty {
+  color: var(--ink-faint);
+}
+
+.task-workdir.is-empty .el-icon {
+  color: var(--ink-faint);
 }
 
 .task-actions {

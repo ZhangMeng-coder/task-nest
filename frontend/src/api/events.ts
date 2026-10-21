@@ -15,6 +15,9 @@ export const EVENT_TYPES = [
   'input_received',
   'task_completed',
   'task_failed',
+  'review_started',
+  'review_completed',
+  'git_checkpoint',
   'run_completed',
   'error',
   'heartbeat',
@@ -25,9 +28,17 @@ export type EventType = (typeof EVENT_TYPES)[number]
 export type ToolStatus = 'success' | 'error'
 export type RunStatus = 'RUNNING' | 'COMPLETED' | 'FAILED'
 export type MainTaskStatus = 'PENDING' | 'RUNNING' | 'WAITING_INPUT' | 'COMPLETED' | 'FAILED'
-export type SubtaskStatus = 'PENDING' | 'RUNNING' | 'WAITING_INPUT' | 'RETRYING' | 'SUCCESS' | 'FAILED'
+export type SubtaskStatus =
+  | 'PENDING' | 'RUNNING' | 'WAITING_INPUT' | 'RETRYING'
+  | 'REVIEWING' | 'SUCCESS' | 'FAILED' | 'CANCELLED'
 export type TaskStatus = MainTaskStatus | SubtaskStatus
 export type ConnectionState = 'IDLE' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING' | 'DISCONNECTED'
+export type PlanSessionStatus =
+  | 'RUNNING' | 'WAITING_INPUT' | 'READY' | 'CONFIRMED' | 'CANCELLED' | 'FAILED'
+export type ReviewVerdict = 'PASS' | 'REWORK'
+export type ReviewSeverity = 'BLOCKER' | 'MAJOR' | 'MINOR'
+export type TestStatus = 'PASSED' | 'FAILED' | 'UNAVAILABLE'
+export type GitAction = 'branch_created' | 'committed' | 'merged' | 'rolled_back' | 'branch_deleted'
 
 export interface TaskRef {
   taskId: string
@@ -42,6 +53,46 @@ export interface PlannedTask {
   title: string
   agentName: string
   dependsOn: string[]
+  description: string | null
+  acceptanceCriteria: string[] | null
+  allowedTools: string[] | null
+  testCommand: string | null
+}
+
+export interface ReviewIssue {
+  severity: ReviewSeverity
+  file: string | null
+  line: number | null
+  message: string
+  suggestion: string | null
+}
+
+export interface TestEvidence {
+  command: string
+  exitCode: number | null
+  timedOut: boolean
+  summary: string
+}
+
+export interface ReviewCompletedPayload {
+  attempt: number
+  verdict: ReviewVerdict
+  summary: string
+  issues: ReviewIssue[]
+  testStatus: TestStatus
+  testEvidence: TestEvidence[]
+  modelName: string | null
+  durationMs: number
+}
+
+export interface GitCheckpointPayload {
+  action: GitAction
+  branch: string
+  targetBranch: string | null
+  commit: string | null
+  attempt: number | null
+  noChanges: boolean
+  message: string | null
 }
 
 export interface DecisionOption {
@@ -71,9 +122,23 @@ export interface ToolResultPayload {
 
 export type EmptyPayload = Record<string, unknown>
 
+export interface PlanPayload {
+  tasks: PlannedTask[]
+  revision: number | null
+  reason: string | null
+  changedTaskIds: string[] | null
+}
+
+export interface WaitingInputPayload {
+  question: string
+  options: DecisionOption[]
+  allowCustom: boolean
+  customPlaceholder: string | null
+}
+
 export interface EventPayloadMap {
   run_started: { goal: string }
-  plan: { tasks: PlannedTask[] }
+  plan: PlanPayload
   task_started: EmptyPayload
   task_thought: { delta: string }
   prompt_assembled: {
@@ -84,10 +149,13 @@ export interface EventPayloadMap {
   }
   tool_call: ToolCallPayload
   tool_result: ToolResultPayload
-  waiting_input: { question: string; options: DecisionOption[] }
-  input_received: { selectedOptionId: string }
+  waiting_input: WaitingInputPayload
+  input_received: { selectedOptionId: string | null; customInput: string | null }
   task_completed: { summary: string }
   task_failed: { error: string; retryable: boolean }
+  review_started: { attempt: number }
+  review_completed: ReviewCompletedPayload
+  git_checkpoint: GitCheckpointPayload
   run_completed: { summary: string }
   error: { code: string; message: string }
   heartbeat: EmptyPayload
@@ -111,6 +179,8 @@ export type TaskNestEvent = { [K in EventType]: EventFor<K> }[EventType]
 export interface WaitingInputSnapshot {
   question: string
   options: DecisionOption[]
+  allowCustom: boolean
+  customPlaceholder: string | null
 }
 
 /** 主任务与子任务只保留两层；快照里主任务单独给出，子任务是扁平直属列表。 */
@@ -167,6 +237,11 @@ export interface PlanRowView {
   agent: string
   dependency: string
   output: string
+  taskId?: string | null
+  description?: string | null
+  acceptanceCriteria?: string[] | null
+  allowedTools?: string[] | null
+  testCommand?: string | null
 }
 
 /** 计划表草案或持久化档案；markdown 直接用于详情展示。 */
@@ -174,17 +249,47 @@ export interface PlanDraftView {
   mainTaskId: string | null
   title: string
   goal: string
-  mockScript: string
+  mockScript: string | null
   version: number
   markdown: string
   rows: PlanRowView[]
   revisions: string[]
 }
 
+export interface PlanSessionView {
+  planSessionId: string
+  status: PlanSessionStatus
+  goal: string
+  workingDir: string
+  plan: PlanPayload | null
+  lastSeq: number
+  error: string | null
+}
+
+export interface CreatePlanSessionResponse {
+  planSessionId: string
+  status: PlanSessionStatus
+  lastSeq: number
+}
+
+export interface ConfirmPlanSessionResponse {
+  mainTaskId: string
+  runId: string
+  workingDir: string
+  planVersion: number
+}
+
+export interface AgentSettingsView {
+  reviewEnabled: boolean
+  reviewMaxReworks: number
+  updatedAt: string | null
+}
+
 export interface CreateMainTaskResponse {
   mainTaskId: string
   runId: string
   mockScript: string
+  workingDir: string | null
   status: MainTaskStatus
   createdAt: string
   plan: PlanDraftView | null
@@ -197,6 +302,7 @@ export interface MainTaskSummary {
   title: string
   goal: string | null
   mockScript: string
+  workingDir: string | null
   planVersion: number
   status: MainTaskStatus
   summary: string | null
@@ -264,7 +370,8 @@ export interface MainTaskDetail {
 export interface AcceptedResponse {
   runId: string
   taskId: string
-  selectedOptionId: string
+  selectedOptionId: string | null
+  customInput: string | null
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -337,9 +444,45 @@ function parsePlannedTasks(value: unknown): PlannedTask[] | null {
     if (taskId === null || title === null || agentName === null || parentTaskId === undefined || !dependsOn) {
       return null
     }
-    tasks.push({ taskId, parentTaskId, title, agentName, dependsOn })
+    tasks.push({
+      taskId,
+      parentTaskId,
+      title,
+      agentName,
+      dependsOn,
+      description: readNullableString(record, 'description'),
+      acceptanceCriteria: parseOptionalStringArray(record.acceptanceCriteria),
+      allowedTools: parseOptionalStringArray(record.allowedTools),
+      testCommand: readNullableString(record, 'testCommand'),
+    })
   }
   return tasks
+}
+
+function readNullableString(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key]
+  return typeof value === 'string' ? value : null
+}
+
+function parseOptionalStringArray(value: unknown): string[] | null {
+  if (value === undefined || value === null) {
+    return null
+  }
+  return parseStringArray(value)
+}
+
+function parsePlanPayload(payload: Record<string, unknown>): PlanPayload | null {
+  const tasks = parsePlannedTasks(payload.tasks)
+  if (tasks === null) {
+    return null
+  }
+  const revisionRaw = payload.revision
+  const revision = typeof revisionRaw === 'number' && Number.isInteger(revisionRaw)
+    ? revisionRaw
+    : null
+  const reason = readNullableString(payload, 'reason')
+  const changedTaskIds = parseOptionalStringArray(payload.changedTaskIds)
+  return { tasks, revision, reason, changedTaskIds }
 }
 
 function parseStringArray(value: unknown): string[] | null {
@@ -380,6 +523,137 @@ function parseOptions(value: unknown): DecisionOption[] | null {
   return options
 }
 
+function parseWaitingInput(payload: Record<string, unknown>): WaitingInputPayload | null {
+  const question = readNonEmptyString(payload, 'question')
+  const options = parseOptions(payload.options)
+  if (question === null || options === null) {
+    return null
+  }
+  const allowCustomRaw = payload.allowCustom
+  const allowCustom = allowCustomRaw === undefined || allowCustomRaw === null
+    ? true
+    : readBoolean(payload, 'allowCustom')
+  if (allowCustom === null) {
+    return null
+  }
+  return {
+    question,
+    options,
+    allowCustom,
+    customPlaceholder: readNullableString(payload, 'customPlaceholder'),
+  }
+}
+
+function parseReviewIssues(value: unknown): ReviewIssue[] | null {
+  if (!Array.isArray(value)) {
+    return null
+  }
+  const issues: ReviewIssue[] = []
+  for (const item of value) {
+    const record = asRecord(item)
+    if (!record) {
+      return null
+    }
+    const severity = readString(record, 'severity')
+    const message = readString(record, 'message')
+    const lineValue = record.line
+    const line = typeof lineValue === 'number' && Number.isInteger(lineValue) ? lineValue : null
+    if (
+      severity !== 'BLOCKER' && severity !== 'MAJOR' && severity !== 'MINOR'
+      || message === null
+    ) {
+      return null
+    }
+    issues.push({
+      severity,
+      file: readNullableString(record, 'file'),
+      line,
+      message,
+      suggestion: readNullableString(record, 'suggestion'),
+    })
+  }
+  return issues
+}
+
+function parseTestEvidence(value: unknown): TestEvidence[] | null {
+  if (!Array.isArray(value)) {
+    return null
+  }
+  const evidence: TestEvidence[] = []
+  for (const item of value) {
+    const record = asRecord(item)
+    if (!record) {
+      return null
+    }
+    const command = readString(record, 'command')
+    const timedOut = readBoolean(record, 'timedOut')
+    const summary = readString(record, 'summary')
+    const exitRaw = record.exitCode
+    const exitCode = typeof exitRaw === 'number' && Number.isInteger(exitRaw) ? exitRaw : null
+    if (command === null || timedOut === null || summary === null) {
+      return null
+    }
+    evidence.push({ command, exitCode, timedOut, summary })
+  }
+  return evidence
+}
+
+function parseReviewCompleted(payload: Record<string, unknown>): ReviewCompletedPayload | null {
+  const attempt = readNumber(payload, 'attempt')
+  const verdict = readString(payload, 'verdict')
+  const summary = readString(payload, 'summary')
+  const issues = parseReviewIssues(payload.issues)
+  const testStatus = readString(payload, 'testStatus')
+  const testEvidence = parseTestEvidence(payload.testEvidence)
+  const durationMs = readNumber(payload, 'durationMs')
+  if (
+    attempt === null || !Number.isInteger(attempt)
+    || (verdict !== 'PASS' && verdict !== 'REWORK')
+    || summary === null
+    || issues === null
+    || (testStatus !== 'PASSED' && testStatus !== 'FAILED' && testStatus !== 'UNAVAILABLE')
+    || testEvidence === null
+    || durationMs === null
+  ) {
+    return null
+  }
+  return {
+    attempt,
+    verdict,
+    summary,
+    issues,
+    testStatus,
+    testEvidence,
+    modelName: readNullableString(payload, 'modelName'),
+    durationMs,
+  }
+}
+
+function parseGitCheckpoint(payload: Record<string, unknown>): GitCheckpointPayload | null {
+  const action = readString(payload, 'action')
+  const branch = readNonEmptyString(payload, 'branch')
+  const noChanges = readBoolean(payload, 'noChanges')
+  const attemptRaw = payload.attempt
+  const attempt = typeof attemptRaw === 'number' && Number.isInteger(attemptRaw) ? attemptRaw : null
+  if (
+    (action !== 'branch_created' && action !== 'committed' && action !== 'merged'
+      && action !== 'rolled_back' && action !== 'branch_deleted')
+    || branch === null
+    || noChanges === null
+  ) {
+    return null
+  }
+  return {
+    action,
+    branch,
+    targetBranch: readNullableString(payload, 'targetBranch'),
+    commit: readNullableString(payload, 'commit'),
+    attempt,
+    noChanges,
+    message: readNullableString(payload, 'message'),
+  }
+}
+
 function parseSnippets(value: unknown): ContextSnippet[] | null {
   if (value === undefined || value === null) {
     return []
@@ -401,6 +675,43 @@ function parseSnippets(value: unknown): ContextSnippet[] | null {
     snippets.push({ source, content })
   }
   return snippets
+}
+
+/** 规划会话视图的运行时校验；plan 允许为 null。 */
+export function parsePlanSessionView(value: unknown): PlanSessionView | null {
+  const record = asRecord(value)
+  if (!record) {
+    return null
+  }
+  const planSessionId = readNonEmptyString(record, 'planSessionId')
+  const status = readString(record, 'status')
+  const goal = readString(record, 'goal')
+  const workingDir = readNonEmptyString(record, 'workingDir')
+  const lastSeq = readNumber(record, 'lastSeq')
+  const error = readNullableString(record, 'error')
+  const planRaw = record.plan
+  if (
+    planSessionId === null
+    || (status !== 'RUNNING' && status !== 'WAITING_INPUT' && status !== 'READY'
+      && status !== 'CONFIRMED' && status !== 'CANCELLED' && status !== 'FAILED')
+    || goal === null
+    || workingDir === null
+    || lastSeq === null
+  ) {
+    return null
+  }
+  let plan: PlanPayload | null = null
+  if (planRaw !== null && planRaw !== undefined) {
+    const planRecord = asRecord(planRaw)
+    if (!planRecord) {
+      return null
+    }
+    plan = parsePlanPayload(planRecord)
+    if (plan === null) {
+      return null
+    }
+  }
+  return { planSessionId, status, goal, workingDir, plan, lastSeq, error }
 }
 
 function eventWith<K extends EventType>(
@@ -467,8 +778,8 @@ export function parseEventValue(decoded: unknown): TaskNestEvent | null {
       return goal === null ? null : eventWith(base, type, { goal })
     }
     case 'plan': {
-      const tasks = parsePlannedTasks(payload.tasks)
-      return tasks === null ? null : eventWith(base, type, { tasks })
+      const plan = parsePlanPayload(payload)
+      return plan === null ? null : eventWith(base, type, plan)
     }
     case 'task_started':
     case 'heartbeat':
@@ -518,18 +829,16 @@ export function parseEventValue(decoded: unknown): TaskNestEvent | null {
       })
     }
     case 'waiting_input': {
-      const question = readNonEmptyString(payload, 'question')
-      const options = parseOptions(payload.options)
-      if (question === null || options === null) {
-        return null
-      }
-      return eventWith(base, type, { question, options })
+      const waiting = parseWaitingInput(payload)
+      return waiting === null ? null : eventWith(base, type, waiting)
     }
     case 'input_received': {
-      const selectedOptionId = readNonEmptyString(payload, 'selectedOptionId')
-      return selectedOptionId === null
-        ? null
-        : eventWith(base, type, { selectedOptionId })
+      const selectedOptionId = readNullableString(payload, 'selectedOptionId')
+      const customInput = readNullableString(payload, 'customInput')
+      if (selectedOptionId === null && customInput === null) {
+        return null
+      }
+      return eventWith(base, type, { selectedOptionId, customInput })
     }
     case 'task_completed': {
       const summary = readString(payload, 'summary')
@@ -541,6 +850,20 @@ export function parseEventValue(decoded: unknown): TaskNestEvent | null {
       return error === null || retryable === null
         ? null
         : eventWith(base, type, { error, retryable })
+    }
+    case 'review_started': {
+      const attempt = readNumber(payload, 'attempt')
+      return attempt === null || !Number.isInteger(attempt)
+        ? null
+        : eventWith(base, type, { attempt })
+    }
+    case 'review_completed': {
+      const review = parseReviewCompleted(payload)
+      return review === null ? null : eventWith(base, type, review)
+    }
+    case 'git_checkpoint': {
+      const checkpoint = parseGitCheckpoint(payload)
+      return checkpoint === null ? null : eventWith(base, type, checkpoint)
     }
     case 'run_completed': {
       const summary = readString(payload, 'summary')

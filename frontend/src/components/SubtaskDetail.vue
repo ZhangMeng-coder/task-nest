@@ -3,9 +3,13 @@ import { computed, ref, watch } from 'vue'
 import type { SubtaskNodeView, ToolCallView } from '@/stores/taskTree'
 import {
   formatDuration,
+  GIT_ACTION_LABEL,
   isTerminalTaskStatus,
   pad2,
+  REVIEW_SEVERITY_LABEL,
+  REVIEW_VERDICT_LABEL,
   SUBTASK_STATUS_LABEL,
+  TEST_STATUS_LABEL,
   TOOL_STATUS_LABEL,
 } from '@/ui/labels'
 
@@ -19,11 +23,16 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  decide: [optionId: string]
+  decide: [optionId: string | null, customInput: string | null]
 }>()
 
 const promptIndex = ref(0)
 const selectedOption = ref('')
+const customInput = ref('')
+
+const canSubmit = computed(() => (
+  Boolean(selectedOption.value) || customInput.value.trim().length > 0
+))
 
 const statusLabel = computed(() => SUBTASK_STATUS_LABEL[props.node.status])
 
@@ -48,6 +57,7 @@ watch(
   () => props.node.waiting?.question,
   () => {
     selectedOption.value = ''
+    customInput.value = ''
   },
 )
 
@@ -71,8 +81,12 @@ const thoughtEmpty = computed(() => {
       return '等待首条思考增量…'
     case 'RETRYING':
       return '上一次尝试失败，正在重新执行。'
+    case 'REVIEWING':
+      return '修改已提交，审核 Agent 正在独立复核并运行测试。'
     case 'WAITING_INPUT':
       return '任务已暂停，等待你在下方做出选择。'
+    case 'CANCELLED':
+      return '计划重排后该子任务被取消，没有执行。'
     default:
       return '该子任务没有记录思考轨迹。'
   }
@@ -122,9 +136,21 @@ function formatJson(value: unknown): string {
 }
 
 function submitDecision(): void {
-  if (selectedOption.value && !props.submitting) {
-    emit('decide', selectedOption.value)
+  if (canSubmit.value && !props.submitting) {
+    emit(
+      'decide',
+      selectedOption.value || null,
+      customInput.value.trim() || null,
+    )
   }
+}
+
+function shortCommit(commit: string | null): string {
+  return commit ? commit.slice(0, 8) : '—'
+}
+
+function reviewTagType(): 'success' | 'danger' {
+  return props.node.review?.verdict === 'PASS' ? 'success' : 'danger'
 }
 </script>
 
@@ -155,6 +181,22 @@ function submitDecision(): void {
       v-if="node.status === 'WAITING_INPUT'"
       :title="node.waiting?.question ?? '等待抉择'"
       type="warning"
+      :closable="false"
+      show-icon
+    />
+    <el-alert
+      v-if="node.status === 'REVIEWING'"
+      :title="`审核 Agent 正在独立复核（第 ${node.reviewAttempt ?? 1} 次审核）`"
+      description="审核使用只读文件工具与受限 shell 自行运行测试；平台测试证据优先于模型结论。"
+      type="info"
+      :closable="false"
+      show-icon
+    />
+    <el-alert
+      v-if="node.status === 'CANCELLED'"
+      title="该子任务已取消"
+      :description="node.error ?? '计划重排后不再需要执行这一步。'"
+      type="info"
       :closable="false"
       show-icon
     />
@@ -245,6 +287,91 @@ function submitDecision(): void {
       </div>
     </div>
 
+    <div v-if="node.review" class="detail-section review-box">
+      <div class="review-head">
+        <div>
+          <p class="detail-label mono">REVIEW · 独立审核 · 第 {{ node.review.attempt }} 次</p>
+          <h3>审核结论</h3>
+        </div>
+        <div class="review-tags">
+          <el-tag :type="reviewTagType()" effect="plain">
+            {{ REVIEW_VERDICT_LABEL[node.review.verdict] }}
+          </el-tag>
+          <el-tag
+            :type="node.review.testStatus === 'PASSED'
+              ? 'success'
+              : node.review.testStatus === 'FAILED' ? 'danger' : 'info'"
+            effect="plain"
+          >
+            {{ TEST_STATUS_LABEL[node.review.testStatus] }}
+          </el-tag>
+        </div>
+      </div>
+      <p class="review-summary">{{ node.review.summary }}</p>
+      <div v-if="node.review.issues.length" class="review-list">
+        <div
+          v-for="(issue, issueIndex) in node.review.issues"
+          :key="`issue-${issueIndex}`"
+          class="review-row"
+        >
+          <el-tag
+            size="small"
+            :type="issue.severity === 'BLOCKER'
+              ? 'danger'
+              : issue.severity === 'MAJOR' ? 'warning' : 'info'"
+            effect="plain"
+          >
+            {{ REVIEW_SEVERITY_LABEL[issue.severity] }}
+          </el-tag>
+          <span class="review-location mono">
+            {{ issue.file ?? '—' }}{{ issue.line !== null ? `:${issue.line}` : '' }}
+          </span>
+          <span class="review-message">
+            {{ issue.message }}
+            <span v-if="issue.suggestion" class="review-suggestion">{{ issue.suggestion }}</span>
+          </span>
+        </div>
+      </div>
+      <div v-if="node.review.testEvidence.length" class="test-evidence">
+        <p class="detail-label mono">TEST EVIDENCE · 平台执行证据</p>
+        <div
+          v-for="(evidence, evidenceIndex) in node.review.testEvidence"
+          :key="`evidence-${evidenceIndex}`"
+          class="evidence-row"
+        >
+          <span class="mono evidence-command">{{ evidence.command }}</span>
+          <span class="mono evidence-exit">
+            {{ evidence.timedOut ? '超时' : `exit ${evidence.exitCode ?? '—'}` }}
+          </span>
+          <span class="evidence-summary">{{ evidence.summary }}</span>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="node.gitCheckpoints.length" class="detail-section git-box">
+      <p class="detail-label mono">GIT · 分支与回滚</p>
+      <div class="git-timeline">
+        <div
+          v-for="checkpoint in node.gitCheckpoints"
+          :key="`${checkpoint.seq}-${checkpoint.action}`"
+          class="git-row"
+        >
+          <span class="mono git-seq">{{ checkpoint.seq }}</span>
+          <span class="git-action">{{ GIT_ACTION_LABEL[checkpoint.action] }}</span>
+          <span class="mono git-branch">
+            {{ checkpoint.branch }}
+            <template v-if="checkpoint.targetBranch"> → {{ checkpoint.targetBranch }}</template>
+          </span>
+          <span class="mono git-commit">{{ shortCommit(checkpoint.commit) }}</span>
+          <span v-if="checkpoint.attempt !== null" class="mono git-attempt">
+            a{{ checkpoint.attempt }}
+          </span>
+          <span v-if="checkpoint.noChanges" class="git-note">无文件变化</span>
+          <span v-if="checkpoint.message" class="git-note">{{ checkpoint.message }}</span>
+        </div>
+      </div>
+    </div>
+
     <div v-if="node.status === 'WAITING_INPUT' && node.waiting" class="decision-box">
       <template v-if="archiveMode">
         <div class="decision-head">
@@ -278,6 +405,17 @@ function submitDecision(): void {
           </el-radio>
         </el-radio-group>
 
+        <el-input
+          v-if="node.waiting.allowCustom"
+          v-model="customInput"
+          type="textarea"
+          :rows="3"
+          resize="none"
+          maxlength="2000"
+          :placeholder="node.waiting.customPlaceholder ?? '也可以直接输入你的要求，Agent 会按你的说明继续'"
+          class="decision-custom"
+        />
+
         <el-alert
           v-if="decisionError"
           :title="decisionError"
@@ -291,18 +429,26 @@ function submitDecision(): void {
           <el-button
             type="primary"
             :loading="submitting"
-            :disabled="!selectedOption"
+            :disabled="!canSubmit || submitting"
             @click="submitDecision"
           >
-            提交选择并继续
+            提交并继续
           </el-button>
           <span class="decision-note">提交后编排器会从暂停处继续。</span>
         </div>
       </template>
     </div>
 
-    <p v-if="node.selectedOptionId && node.status !== 'WAITING_INPUT'" class="decision-done">
-      已提交选择 <span class="mono">{{ node.selectedOptionId }}</span>
+    <p
+      v-if="(node.selectedOptionId || node.lastCustomInput) && node.status !== 'WAITING_INPUT'"
+      class="decision-done"
+    >
+      <template v-if="node.selectedOptionId">
+        已提交选择 <span class="mono">{{ node.selectedOptionId }}</span>
+      </template>
+      <template v-else>
+        已提交自定义输入 <span class="mono">{{ node.lastCustomInput }}</span>
+      </template>
       <template v-if="archiveMode">，这是历史运行中的选择记录。</template>
       <template v-else>，编排器已继续执行。</template>
     </p>
@@ -542,6 +688,167 @@ function submitDecision(): void {
 
 .decision-done .mono {
   color: var(--success);
+}
+
+.decision-custom {
+  margin-top: 10px;
+}
+
+.review-box {
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+}
+
+.review-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.review-head h3 {
+  margin-top: 3px;
+  font-size: 14px;
+}
+
+.review-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.review-summary {
+  margin-top: 8px;
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.review-row {
+  display: grid;
+  grid-template-columns: 64px 180px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--line);
+  background: var(--paper-sunk);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.review-location {
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-message {
+  color: var(--ink-soft);
+}
+
+.review-suggestion {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.test-evidence {
+  margin-top: 12px;
+}
+
+.evidence-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) 90px minmax(0, 1fr);
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.evidence-command {
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-exit {
+  color: var(--ink-faint);
+}
+
+.evidence-summary {
+  color: var(--ink-soft);
+}
+
+.git-box {
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+}
+
+.git-timeline {
+  display: flex;
+  flex-direction: column;
+}
+
+.git-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.git-row:last-child {
+  border-bottom: none;
+}
+
+.git-seq {
+  color: var(--ink-faint);
+  font-size: 9px;
+}
+
+.git-action {
+  min-width: 56px;
+  color: var(--signal-deep);
+  font-size: 10px;
+}
+
+.git-branch {
+  color: var(--ink);
+  font-size: 9.5px;
+}
+
+.git-commit {
+  color: var(--ink-faint);
+  font-size: 9px;
+}
+
+.git-attempt {
+  color: var(--ink-faint);
+  font-size: 9px;
+}
+
+.git-note {
+  color: var(--ink-faint);
+  font-size: 9.5px;
 }
 
 .subtask-foot {

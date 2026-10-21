@@ -89,6 +89,7 @@ public class RunStore {
         if (waiting == null || taskId == null || !taskId.equals(waiting.taskId())) {
             return null;
         }
-        return new RunSnapshot.WaitingInputSnapshot(waiting.question(), waiting.options());
+        return new RunSnapshot.WaitingInputSnapshot(
+                waiting.question(), waiting.options(), waiting.allowCustom(), waiting.customPlaceholder());
     }
 }

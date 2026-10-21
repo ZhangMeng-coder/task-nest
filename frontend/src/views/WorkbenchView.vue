@@ -4,9 +4,10 @@ import { ElMessage, ElNotification } from 'element-plus'
 import AppHeader from '@/components/AppHeader.vue'
 import CreateTaskPanel from '@/components/CreateTaskPanel.vue'
 import EventLogDialog from '@/components/EventLogDialog.vue'
+import SettingsDialog from '@/components/SettingsDialog.vue'
 import TaskDirectory from '@/components/TaskDirectory.vue'
 import TaskWorkspace from '@/components/TaskWorkspace.vue'
-import type { PlanDraftView, TaskNestEvent } from '@/api/events'
+import type { TaskNestEvent } from '@/api/events'
 import { useTaskTreeStore } from '@/stores/taskTree'
 import type { DirectoryTask } from '@/ui/directory'
 
@@ -19,6 +20,7 @@ const store = useTaskTreeStore()
 
 const mode = ref<'task' | 'create'>('task')
 const logOpen = ref(false)
+const settingsOpen = ref(false)
 const focusTaskId = ref<string | null>(null)
 const pendingId = ref<string | null>(null)
 
@@ -32,6 +34,7 @@ const entries = computed<DirectoryTask[]>(() => {
       title: summary.title,
       goal: summary.goal,
       mockScript: summary.mockScript,
+      workingDir: summary.workingDir,
       status: summary.status,
       subtaskCount: summary.subtaskCount,
       completedCount: summary.completedSubtaskCount,
@@ -50,6 +53,7 @@ const entries = computed<DirectoryTask[]>(() => {
       title: store.mainNode.title,
       goal: store.goal ?? existing?.goal ?? null,
       mockScript: store.mockScript ?? existing?.mockScript ?? '',
+      workingDir: store.workingDir ?? existing?.workingDir ?? null,
       status: store.mainNode.status,
       subtaskCount: store.subtaskCount || existing?.subtaskCount || 0,
       completedCount: store.successCount,
@@ -205,6 +209,23 @@ function handleEvent(event: TaskNestEvent): void {
       }
       break
     }
+    case 'review_completed': {
+      const review = event.payload
+      if (review.verdict === 'REWORK' || review.testStatus === 'FAILED') {
+        notify({
+          title: `审核未通过 · ${event.task?.title ?? '子任务'}`,
+          message: `${review.summary}${review.testStatus === 'FAILED' ? '（测试失败）' : ''}`,
+          type: 'warning',
+          duration: 6000,
+          onClick: () => {
+            if (event.task) {
+              focusTask(event.task.taskId)
+            }
+          },
+        })
+      }
+      break
+    }
     case 'run_completed': {
       closeAllWaiting()
       notify({
@@ -316,17 +337,13 @@ function startCreate(): void {
   focusTaskId.value = null
 }
 
-async function confirmCreate(draft: PlanDraftView): Promise<void> {
-  const ok = await store.startRun(draft.mockScript, draft.goal, draft)
-  if (!ok) {
-    return
-  }
+function handlePlanningStarted(): void {
   mode.value = 'task'
   pendingId.value = null
   focusTaskId.value = null
   notify({
     title: '主任务已创建',
-    message: `「${draft.title}」已按计划开始运行。`,
+    message: `「${store.mainNode?.title ?? '主任务'}」已按确认的计划开始执行。`,
     type: 'success',
     duration: 4500,
   })
@@ -356,6 +373,7 @@ onBeforeUnmount(() => {
       :total="entries.length"
       :active="activeCount"
       :archive-mode="store.archiveMode"
+      @open-settings="settingsOpen = true"
     />
 
     <div class="app-body">
@@ -372,8 +390,7 @@ onBeforeUnmount(() => {
       <main class="workspace">
         <CreateTaskPanel
           v-if="mode === 'create'"
-          :starting="store.starting"
-          @confirm="confirmCreate"
+          @started="handlePlanningStarted"
         />
         <TaskWorkspace
           v-else
@@ -390,6 +407,8 @@ onBeforeUnmount(() => {
       :title="logTitle"
       :main-task-id="store.mainTaskId"
     />
+
+    <SettingsDialog v-model="settingsOpen" />
   </div>
 </template>
 

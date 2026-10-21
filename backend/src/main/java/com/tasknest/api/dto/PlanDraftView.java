@@ -13,9 +13,23 @@ public record PlanDraftView(
         int version,
         String markdown,
         List<PlanRowView> rows,
-        List<String> revisions
+        List<String> revisions,
+        int revision
 ) {
+    public PlanDraftView(String mainTaskId,
+                         String title,
+                         String goal,
+                         String mockScript,
+                         int version,
+                         String markdown,
+                         List<PlanRowView> rows,
+                         List<String> revisions) {
+        this(mainTaskId, title, goal, mockScript, version, markdown, rows, revisions,
+                Math.max(1, version));
+    }
+
     public PlanDraftView withMainTaskId(String value) {
-        return new PlanDraftView(value, title, goal, mockScript, version, markdown, rows, revisions);
+        return new PlanDraftView(value, title, goal, mockScript, version, markdown, rows,
+                revisions, revision);
     }
 }

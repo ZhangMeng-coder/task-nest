@@ -8,6 +8,7 @@ public record CreateMainTaskResponse(
         String mainTaskId,
         String runId,
         String mockScript,
+        String workingDir,
         MainTaskStatus status,
         Instant createdAt,
         PlanDraftView plan

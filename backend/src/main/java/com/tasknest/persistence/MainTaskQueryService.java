@@ -16,12 +16,14 @@ import com.tasknest.common.ErrorCode;
 import com.tasknest.event.EventPayload;
 import com.tasknest.persistence.entity.MainTaskEntity;
 import com.tasknest.persistence.entity.MainTaskPlanEntity;
+import com.tasknest.persistence.entity.MainTaskWorkspaceEntity;
 import com.tasknest.persistence.entity.PromptEntity;
 import com.tasknest.persistence.entity.RunEventEntity;
 import com.tasknest.persistence.entity.SubtaskEntity;
 import com.tasknest.persistence.entity.TaskArtifactEntity;
 import com.tasknest.persistence.service.MainTaskEntityService;
 import com.tasknest.persistence.service.MainTaskPlanEntityService;
+import com.tasknest.persistence.service.MainTaskWorkspaceEntityService;
 import com.tasknest.persistence.service.PromptEntityService;
 import com.tasknest.persistence.service.RunEventEntityService;
 import com.tasknest.persistence.service.SubtaskEntityService;
@@ -61,6 +63,7 @@ public class MainTaskQueryService {
 
     private final MainTaskEntityService mainTaskService;
     private final MainTaskPlanEntityService planService;
+    private final MainTaskWorkspaceEntityService workspaceService;
     private final SubtaskEntityService subtaskService;
     private final PromptEntityService promptService;
     private final TaskArtifactEntityService artifactService;
@@ -69,6 +72,7 @@ public class MainTaskQueryService {
 
     public MainTaskQueryService(MainTaskEntityService mainTaskService,
                                 MainTaskPlanEntityService planService,
+                                MainTaskWorkspaceEntityService workspaceService,
                                 SubtaskEntityService subtaskService,
                                 PromptEntityService promptService,
                                 TaskArtifactEntityService artifactService,
@@ -76,6 +80,7 @@ public class MainTaskQueryService {
                                 ObjectMapper objectMapper) {
         this.mainTaskService = mainTaskService;
         this.planService = planService;
+        this.workspaceService = workspaceService;
         this.subtaskService = subtaskService;
         this.promptService = promptService;
         this.artifactService = artifactService;
@@ -90,6 +95,7 @@ public class MainTaskQueryService {
                         .orderByDesc(MainTaskEntity::getCreatedAt)
                         .last("LIMIT " + bounded));
         Map<String, Integer> planVersions = new HashMap<>();
+        Map<String, String> workingDirs = new HashMap<>();
         if (!entities.isEmpty()) {
             List<String> ids = entities.stream().map(MainTaskEntity::getMainTaskId).toList();
             List<MainTaskPlanEntity> plans = planService.list(
@@ -98,6 +104,12 @@ public class MainTaskQueryService {
             for (MainTaskPlanEntity plan : plans) {
                 planVersions.put(plan.getMainTaskId(),
                         plan.getPlanVersion() == null ? 0 : plan.getPlanVersion());
+            }
+            List<MainTaskWorkspaceEntity> workspaces = workspaceService.list(
+                    Wrappers.<MainTaskWorkspaceEntity>lambdaQuery()
+                            .in(MainTaskWorkspaceEntity::getMainTaskId, ids));
+            for (MainTaskWorkspaceEntity workspace : workspaces) {
+                workingDirs.put(workspace.getMainTaskId(), workspace.getWorkingDir());
             }
         }
         List<MainTaskSummary> result = new ArrayList<>(entities.size());
@@ -108,7 +120,8 @@ public class MainTaskQueryService {
                     .eq(SubtaskEntity::getMainTaskId, entity.getMainTaskId())
                     .eq(SubtaskEntity::getStatus, SubtaskStatus.SUCCESS.name()));
             result.add(toSummary(entity, total, completed,
-                    planVersions.getOrDefault(entity.getMainTaskId(), 0)));
+                    planVersions.getOrDefault(entity.getMainTaskId(), 0),
+                    workingDirs.get(entity.getMainTaskId())));
         }
         return result;
     }
@@ -135,6 +148,10 @@ public class MainTaskQueryService {
                 Wrappers.<MainTaskPlanEntity>lambdaQuery()
                         .eq(MainTaskPlanEntity::getMainTaskId, mainTaskId));
         PlanDraftView plan = planEntity == null ? null : toPlan(planEntity);
+        MainTaskWorkspaceEntity workspaceEntity = workspaceService.getOne(
+                Wrappers.<MainTaskWorkspaceEntity>lambdaQuery()
+                        .eq(MainTaskWorkspaceEntity::getMainTaskId, mainTaskId));
+        String workingDir = workspaceEntity == null ? null : workspaceEntity.getWorkingDir();
 
         long completed = subtasks.stream()
                 .filter(subtask -> SubtaskStatus.SUCCESS.name().equals(subtask.getStatus()))
@@ -151,7 +168,7 @@ public class MainTaskQueryService {
 
         int planVersion = plan == null ? 0 : plan.version();
         return new MainTaskDetail(
-                toSummary(main, subtasks.size(), completed, planVersion),
+                toSummary(main, subtasks.size(), completed, planVersion, workingDir),
                 plan,
                 subtasks.stream().map(this::toSubtask).toList(),
                 prompts.stream().map(this::toPrompt).toList(),
@@ -173,7 +190,8 @@ public class MainTaskQueryService {
     private MainTaskSummary toSummary(MainTaskEntity entity,
                                       long subtaskCount,
                                       long completed,
-                                      int planVersion) {
+                                      int planVersion,
+                                      String workingDir) {
         return new MainTaskSummary(
                 entity.getMainTaskId(),
                 entity.getRunId(),
@@ -181,6 +199,7 @@ public class MainTaskQueryService {
                 entity.getTitle(),
                 entity.getGoal(),
                 entity.getMockScript(),
+                workingDir,
                 planVersion,
                 MainTaskStatus.valueOf(entity.getStatus()),
                 entity.getSummary(),

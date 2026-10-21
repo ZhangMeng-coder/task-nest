@@ -58,8 +58,16 @@ const filtered = computed(() => {
 function typeTag(type: EventType): 'success' | 'warning' | 'danger' | 'info' | 'primary' {
   if (type === 'task_completed' || type === 'run_completed') return 'success'
   if (type === 'task_failed' || type === 'error') return 'danger'
-  if (type === 'waiting_input') return 'warning'
-  if (type === 'task_started' || type === 'plan' || type === 'run_started') return 'primary'
+  if (type === 'waiting_input' || type === 'review_started') return 'warning'
+  if (
+    type === 'task_started'
+    || type === 'plan'
+    || type === 'run_started'
+    || type === 'review_completed'
+    || type === 'git_checkpoint'
+  ) {
+    return 'primary'
+  }
   return 'info'
 }
 
@@ -68,7 +76,8 @@ function messageOf(event: TaskNestEvent): string {
     case 'run_started':
       return `目标：${event.payload.goal}`
     case 'plan':
-      return `计划：${event.payload.tasks.length} 个任务节点`
+      return `计划 v${event.payload.revision ?? 1}：${event.payload.tasks.length} 个任务节点`
+        + (event.payload.reason ? ` · ${event.payload.reason}` : '')
     case 'task_started':
       return `任务开始：${event.task?.title ?? '—'}`
     case 'task_thought':
@@ -82,11 +91,23 @@ function messageOf(event: TaskNestEvent): string {
     case 'waiting_input':
       return event.payload.question
     case 'input_received':
-      return `已提交选项 ${event.payload.selectedOptionId}`
+      return event.payload.customInput
+        ? `自定义输入：${event.payload.customInput}`
+        : `已提交选项 ${event.payload.selectedOptionId ?? '—'}`
     case 'task_completed':
       return event.payload.summary || '子任务完成'
     case 'task_failed':
       return `${event.payload.error}${event.payload.retryable ? '（可重试）' : '（不可重试）'}`
+    case 'review_started':
+      return `审核 Agent 开始第 ${event.payload.attempt} 次复核`
+    case 'review_completed':
+      return `审核 ${event.payload.verdict} · 测试 ${event.payload.testStatus}`
+        + ` · ${event.payload.issues.length} 个问题 · ${event.payload.durationMs}ms`
+    case 'git_checkpoint':
+      return `${event.payload.action} · ${event.payload.branch}`
+        + (event.payload.targetBranch ? ` → ${event.payload.targetBranch}` : '')
+        + (event.payload.commit ? ` · ${event.payload.commit.slice(0, 8)}` : '')
+        + (event.payload.noChanges ? ' · 无文件变化' : '')
     case 'run_completed':
       return event.payload.summary || '运行完成'
     case 'error':

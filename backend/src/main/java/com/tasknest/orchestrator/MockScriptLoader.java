@@ -199,6 +199,8 @@ public class MockScriptLoader {
             case TASK_FAILED -> new EventPayload.TaskFailed(
                     requiredText(payload, "error"),
                     requiredBoolean(payload, "retryable"));
+            case REVIEW_STARTED, REVIEW_COMPLETED, GIT_CHECKPOINT ->
+                    throw new ScriptValidationException("脚本不允许定义 " + type.wireName() + " 事件");
             case RUN_COMPLETED -> new EventPayload.RunCompleted(text(payload, "summary", true));
             case ERROR -> new EventPayload.Error(
                     requiredText(payload, "code"),

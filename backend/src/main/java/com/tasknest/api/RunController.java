@@ -48,7 +48,8 @@ public class RunController {
     public ResponseEntity<ApiResponse<AcceptedResponse>> submitInput(
             @PathVariable String runId,
             @Valid @RequestBody SubmitInputRequest request) {
-        AcceptedResponse response = runService.submitInput(runId, request.taskId(), request.selectedOptionId());
+        AcceptedResponse response = runService.submitInput(
+                runId, request.taskId(), request.selectedOptionId(), request.customInput());
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(ApiResponse.ok(response));
     }
 

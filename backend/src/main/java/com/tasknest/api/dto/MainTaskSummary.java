@@ -11,6 +11,7 @@ public record MainTaskSummary(
         String title,
         String goal,
         String mockScript,
+        String workingDir,
         int planVersion,
         MainTaskStatus status,
         String summary,

@@ -1,0 +1,7 @@
+package com.tasknest.persistence.service;
+
+import com.baomidou.mybatisplus.extension.service.IService;
+import com.tasknest.persistence.entity.AgentSettingEntity;
+
+public interface AgentSettingEntityService extends IService<AgentSettingEntity> {
+}

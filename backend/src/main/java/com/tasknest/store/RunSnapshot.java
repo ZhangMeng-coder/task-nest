@@ -62,7 +62,9 @@ public record RunSnapshot(
 
     public record WaitingInputSnapshot(
             String question,
-            List<EventPayload.DecisionOption> options
+            List<EventPayload.DecisionOption> options,
+            Boolean allowCustom,
+            String customPlaceholder
     ) {
     }
 }

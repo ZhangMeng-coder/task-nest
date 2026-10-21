@@ -6,8 +6,10 @@ import com.tasknest.config.TaskNestProperties;
 import com.tasknest.event.EventPayload;
 import com.tasknest.event.EventPublisher;
 import com.tasknest.event.EventType;
+import com.tasknest.service.InputValidation;
 import com.tasknest.store.RunState;
 import com.tasknest.store.RunStore;
+import com.tasknest.store.UserInput;
 import com.tasknest.store.WaitingInputState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,7 +23,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
-// P3: 替换为 SpringAiTaskOrchestrator；TaskOrchestrator 接口、SSE 层与事件契约保持不变。
+// 演练模式：请求带 mockScript 时由 CodingTaskOrchestrator 委托本类执行脚本。
 @Component
 public class MockTaskOrchestrator implements TaskOrchestrator {
 
@@ -61,7 +63,7 @@ public class MockTaskOrchestrator implements TaskOrchestrator {
     }
 
     @Override
-    public void submitInput(String runId, String taskId, String optionId) {
+    public void submitInput(String runId, String taskId, String optionId, String customInput) {
         RunState run = runStore.require(runId);
         synchronized (run.getLock()) {
             boolean mainTask = taskId.equals(run.getMainTask().getRootTaskId());
@@ -75,13 +77,9 @@ public class MockTaskOrchestrator implements TaskOrchestrator {
             if (waiting == null || !waiting.taskId().equals(taskId)) {
                 throw new BusinessException(ErrorCode.NOT_WAITING_INPUT);
             }
-            boolean valid = waiting.options().stream()
-                    .anyMatch(option -> option.id().equals(optionId));
-            if (!valid) {
-                throw new BusinessException(ErrorCode.INVALID_OPTION);
-            }
+            UserInput input = InputValidation.validate(waiting, optionId, customInput);
             run.setWaitingInput(null);
-            waiting.queue().offer(optionId);
+            waiting.queue().offer(input);
         }
     }
 
@@ -90,9 +88,9 @@ public class MockTaskOrchestrator implements TaskOrchestrator {
             for (MockEvent event : events) {
                 sleep(run, event.delayMs());
                 if (event.type() == EventType.WAITING_INPUT) {
-                    String optionId = pauseForInput(run, event);
-                    publishInputReceived(run, event, optionId);
-                    executeBranch(run, event.branches().get(optionId));
+                    UserInput input = pauseForInput(run, event);
+                    publishInputReceived(run, event, input);
+                    executeBranch(run, event.branches().get(input.selectedOptionId()));
                 } else {
                     publish(run, event, applyGoalOverride(event, request));
                 }
@@ -126,25 +124,27 @@ public class MockTaskOrchestrator implements TaskOrchestrator {
             }
             sleep(run, event.delayMs());
             if (event.type() == EventType.WAITING_INPUT) {
-                String optionId = pauseForInput(run, event);
-                publishInputReceived(run, event, optionId);
-                executeBranch(run, event.branches().get(optionId));
+                UserInput input = pauseForInput(run, event);
+                publishInputReceived(run, event, input);
+                executeBranch(run, event.branches().get(input.selectedOptionId()));
             } else {
                 publish(run, event, event.payload());
             }
         }
     }
 
-    private String pauseForInput(RunState run, MockEvent event) throws InterruptedException {
+    private UserInput pauseForInput(RunState run, MockEvent event) throws InterruptedException {
         if (!(event.payload() instanceof EventPayload.WaitingInput waitingInput)) {
             throw new IllegalStateException("waiting_input 载荷类型错误");
         }
-        BlockingQueue<String> queue = new LinkedBlockingQueue<>(1);
+        BlockingQueue<UserInput> queue = new LinkedBlockingQueue<>(1);
         WaitingInputState state = new WaitingInputState(
                 event.task().taskId(),
                 event.task(),
                 waitingInput.question(),
                 waitingInput.options(),
+                waitingInput.allowCustom(),
+                waitingInput.customPlaceholder(),
                 queue);
         synchronized (run.getLock()) {
             run.setWaitingInput(state);
@@ -153,12 +153,12 @@ public class MockTaskOrchestrator implements TaskOrchestrator {
         return queue.take();
     }
 
-    private void publishInputReceived(RunState run, MockEvent mockEvent, String optionId) {
+    private void publishInputReceived(RunState run, MockEvent mockEvent, UserInput input) {
         eventPublisher.publish(
                 run,
                 EventType.INPUT_RECEIVED,
                 mockEvent.task(),
-                new EventPayload.InputReceived(optionId));
+                new EventPayload.InputReceived(input.selectedOptionId(), input.customInput()));
     }
 
     private EventPayload applyGoalOverride(MockEvent event, RunRequest request) {

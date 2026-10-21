@@ -14,6 +14,8 @@ export interface SseOptions {
   onEvent: (event: TaskNestEvent) => void
   onStateChange: (state: ConnectionState, attempt: number) => void
   onParseError: (raw: string, reason: string, seq: number | null) => void
+  /** 规划会话复用同一封装；缺省为运行 SSE。 */
+  streamUrl?: (afterSeq: number) => string
 }
 
 /**
@@ -84,7 +86,9 @@ export class SseClient {
     this.disposeSource()
     this.options.onStateChange(this.attempt > 0 ? 'RECONNECTING' : 'CONNECTING', this.attempt)
 
-    const url = `${apiBase()}/api/runs/${encodeURIComponent(this.options.runId)}/events?afterSeq=${afterSeq}`
+    const url = this.options.streamUrl
+      ? this.options.streamUrl(afterSeq)
+      : `${apiBase()}/api/runs/${encodeURIComponent(this.options.runId)}/events?afterSeq=${afterSeq}`
     const source = new EventSource(url)
     this.source = source
 

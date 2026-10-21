@@ -5,10 +5,12 @@ public enum SubtaskStatus {
     RUNNING,
     WAITING_INPUT,
     RETRYING,
+    REVIEWING,
     SUCCESS,
-    FAILED;
+    FAILED,
+    CANCELLED;
 
     public boolean isTerminal() {
-        return this == SUCCESS || this == FAILED;
+        return this == SUCCESS || this == FAILED || this == CANCELLED;
     }
 }

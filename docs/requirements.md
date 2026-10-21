@@ -1,4 +1,4 @@
-# TaskNest 详细需求文档（P0–P2 展示层 + MySQL 持久化）
+# TaskNest 详细需求文档（P3 软件开发 Agent 平台）
 
 > 文档性质：需求基线（SRS），用于指导 `backend/`、`frontend/` 与 `docs/events.md` 的实现和验收。
 >
@@ -16,7 +16,7 @@
 | 日期 | 2026-10-21 |
 | 依据 | `todo.md` v1.0 + MySQL 持久化 + 计划表工作台交互 |
 | 状态 | 已实现 |
-| 适用阶段 | P0–P2（展示层 + MySQL 持久化） |
+| 适用阶段 | P3（软件开发 Agent 平台，含 P0–P2 展示层与 MySQL 持久化） |
 | 读者 | 前端、后端、测试、评审人 |
 | 契约同步文件 | `docs/events.md`（实现时创建，与本文第 6 章一致） |
 
@@ -53,29 +53,34 @@ TaskNest（任务巢）是一个**本地运行的 Agent 任务工作台**。它�
 - 运行过程中需要用户裁决的岔路，用户通过鼠标点选完成选择；
 - 完整的事件流，便于调试与复盘。
 
-### 1.2 本阶段目标（P0–P2 + 持久化）
+### 1.2 本阶段目标（P3 软件开发 Agent）
 
-本阶段做“展示层 + 事件协议 + MySQL 档案”的打磨：
+在既有“展示层 + 事件协议 + MySQL 档案”之上，把任务工作台升级为本地软件开发 Agent：
 
-1. 用代码定义一套稳定的 SSE 事件契约；
-2. 提供一个可编程的 Mock 编排器，按脚本推送事件；
-3. 前端仅依赖事件流与快照，还原两层任务结构、详情与抉择交互；
-4. 用 4 个刻意“不完美”的 Mock 脚本验证协议与前端健壮性；
-5. 用 MyBatis-Plus 把主任务、计划表、直属子任务、提示词、思考与工具调用、事件原文写入 MySQL；
-6. 支持创建多个主任务，并通过左侧主任务目录查询任一主任务的历史详情；
-7. 创建主任务前强制生成 Markdown 计划表，允许用提示词修订，确认后随主任务持久化。
+1. 创建主任务前建立 SSE 规划会话，主 Agent 读取仓库、拆分两层计划，含糊处可向用户提问；
+2. 用户确认计划后创建主任务，在 Git 仓库中创建主任务临时分支并串行执行直属子任务；
+3. 子 Agent 通过目录查询、文件查询、文件读取、文件创建、文件写入、本地 Shell 实现任务；
+4. 每个子任务使用独立临时分支；成功合并、退回或失败时删除分支，主任务结束前原分支不变；
+5. 可配置独立审核 Agent：在已提交的子任务分支上自行执行测试，输出结构化结论；
+6. 审核退回时携带问题与测试输出重做；超过重做上限则失败并回滚；
+7. 主 Agent 在子任务之间可动态重排未开始的任务，计划 `revision` 递增；
+8. 主 Agent、子 Agent、审核 Agent 都可通过 `waiting_input` 向用户展示选项与自由输入框；
+9. 运行结束前由主 Agent 汇总，合并主任务分支回原分支；合并冲突时保留现场并报错；
+10. 保留 Mock 脚本链路，真实模式与 Mock 模式共用事件、SSE、REST 与前端类型。
 
-**本阶段结束时应达到的状态：** 把 `MockTaskOrchestrator` 替换为真实的 Spring AI 编排器时，
-SSE 层、事件契约、持久化映射与前端无需改动。
+**本阶段结束时应达到的状态：** 真实编码运行、审核、Git 回滚与前端工作台形成完整闭环，
+且事件契约在 Java、TypeScript、`docs/events.md` 三处逐字段一致。
 
 ### 1.3 成功标准
 
-- 验收清单（第 12 章）全部通过；
+- 验收清单（第 12 章与 `docs/p3-agent-platform.md` 第 15 节）全部通过；
 - 事件契约在 Java、TypeScript、`docs/events.md` 三处逐字段一致；
 - 断线、乱序、重复、丢投递等异常下，UI 不崩溃且最终状态一致；
 - 任务层级严格为两层：一个主任务 + 直属子任务；
+- 所有文件工具限制在工作目录内，敏感路径与 Git 写命令被拒绝；
+- 审核测试失败、超时或留下工作区副作用时，不得被判为 PASS；
 - 重启进程后，MySQL 中的主任务档案仍可列表与查看；
-- 全程没有任何真实大模型调用。
+- Mock 脚本链路保持可用；真实模型仅在用户配置 API Key 后调用。
 
 ### 1.4 术语表
 
@@ -126,39 +131,48 @@ SSE 层、事件契约、持久化映射与前端无需改动。
 
 | 模块 | 内容 |
 | --- | --- |
-| 事件契约 | 信封、14 种事件类型、payload 结构、序号/去重/续传规则、状态机。 |
-| 后端编排 | `TaskOrchestrator` 接口 + `MockTaskOrchestrator`；内存事件表；4 个两层 Mock 脚本。 |
-| SSE 出口 | `SseEmitter` 管理、1 小时超时、15 秒心跳、`afterSeq` 补发、断连清理。 |
-| REST API | 创建主任务、计划草案 / 修订、主任务列表 / 详情、提交抉择、获取快照、SSE 事件流。 |
-| 持久化 | MySQL + MyBatis-Plus；`IService` / `ServiceImpl` / `BaseMapper` 管理实体；事件同步落库。 |
-| 数据表 | `tn_main_task`、`tn_main_task_plan`、`tn_subtask`、`tn_prompt`、`tn_task_artifact`、`tn_event`。 |
-| 前端工作台 | 上下页头 + 左右目录布局、强制 Markdown 计划表、两层子任务折叠详情、抉择面板、日志弹窗、连接状态、主任务档案。 |
-| 前端状态机 | `taskTree` store：事件 → 主任务 + 子任务状态，幂等、排序、增量拼接、快照恢复、只读档案。 |
+| 事件契约 | 信封、17 种事件类型、payload 结构、序号/去重/续传规则、状态机。 |
+| 后端编排 | `TaskOrchestrator` 接口；`CodingTaskOrchestrator`（真实执行）+ `MockTaskOrchestrator`（脚本演示）。 |
+| 规划会话 | 创建主任务前的 SSE 会话；只读工具调查仓库；计划修订、确认、取消与工作区锁。 |
+| Agent 循环 | 主 / 子 / 审核 Agent 共用 `AgentLoop`；OpenAI 兼容 function tool calling；`ask_user` 抉择。 |
+| 工具 | `fs.list`、`fs.find`、`fs.read`、`fs.create`、`fs.write`、`shell.exec`；工作目录沙箱与危险命令策略。 |
+| Git | 主任务 / 子任务临时分支、`--no-ff` 合并、回滚删除、只读 Git Shell 白名单、`git_checkpoint` 事件。 |
+| 审核 | 可配置开关与最大重做次数；独立 `ReviewTestRunner`；结构化 JSON 结论与强制判定规则。 |
+| SSE 出口 | `SseEmitter` 管理、1 小时超时、15 秒心跳、`afterSeq` 补发、断连清理；运行与规划会话各一条流。 |
+| REST API | 创建主任务、规划会话、计划草案 / 修订、主任务列表 / 详情、提交抉择、获取快照、SSE 事件流、本地目录浏览、LLM 设置、Agent 设置。 |
+| 持久化 | MySQL + MyBatis-Plus；事件同步落库；规划会话、Agent 设置与审核记录落库。 |
+| 数据表 | `tn_main_task`、`tn_main_task_plan`、`tn_main_task_workspace`、`tn_subtask`、`tn_prompt`、`tn_task_artifact`、`tn_event`、`tn_llm_setting`、`tn_llm_setting_model`、`tn_plan_session`、`tn_plan_session_event`、`tn_agent_setting`、`tn_task_review`。 |
+| 工作目录 | 规划会话与执行都必须选择 Git 仓库根目录；校验干净工作区并规范化路径。 |
+| LLM 设置 | OpenAI 兼容 Base URL、模型名；literal 密钥或环境变量名；写入 MySQL、启动加载、保存后热更新。 |
+| 前端工作台 | 上下页头 + 左右目录布局、SSE 规划会话、计划表、工作目录选择器、两层子任务折叠详情、抉择面板（选项 + 自由输入）、审核与 Git 时间线、日志弹窗、连接状态、主任务档案、LLM / Agent 设置。 |
+| 前端状态机 | `taskTree` store：事件 → 主任务 + 子任务状态，幂等、排序、增量拼接、快照恢复、只读档案、动态计划。 |
 | SSE 客户端 | `EventSource` 封装、指数退避重连、`afterSeq` 续传、连接状态暴露。 |
 | 文档 | `docs/events.md` 与前后端类型定义同步。 |
 
 ### 3.2 本阶段明确禁止（范围锁）
 
-- **禁止**接入真实大模型、Spring AI `ChatClient`、`TaskTool` 或任何模型 SDK；
 - **禁止**多模型路由、RAG、向量库、Embedding；
 - **禁止**用户体系、权限、登录、鉴权；
 - **禁止**消息队列、Redis、微服务拆分、服务注册发现；
 - **禁止**为等待输入另开 SSE 连接、使用轮询或 WebSocket；
-- **禁止**三层及以上任务层级；脚本出现非直属子任务时必须在加载阶段失败；
+- **禁止**三层及以上任务层级；真实规划输出或 Mock 脚本出现非直属子任务时必须失败；
 - **禁止**把实时运行恢复成可继续执行的进程状态；进程重启后只允许查询已落库档案；
-- **禁止**任务取消、任务编辑等 P4/P5 功能。
+- **禁止**远端 Git 操作（fetch / pull / push / PR）与强制推送；
+- **禁止**子 Agent 或审核 Agent 写 Git。分支、提交、合并、回滚由编排器独占；
+- **禁止**审核 Agent 使用文件写工具；其 Shell 仅允许测试、lint、build、类型检查与只读 Git；
+- **禁止**在日志或 API 响应中输出 LLM 密钥、数据库密码等敏感值；
+- **禁止** token / 费用预算与计费逻辑（P3 明确不做）。
 
-数据库持久化已从范围锁中移除：允许使用 MySQL + MyBatis-Plus，但只保存主任务、计划表、
-直属子任务、提示词、中间结果与事件原文，不引入 JPA、Flyway、消息队列或分布式事务。
-计划表持久化与修订只影响档案展示，不改变 Mock 脚本的任务结构，也不接入真实模型规划。
+数据库只保存主任务、计划表、工作目录、直属子任务、提示词、中间结果、事件原文、
+LLM 连接设置、规划会话、Agent 设置与审核记录，不引入 JPA、Flyway、消息队列或分布式事务。
+真实模型调用通过自研 OpenAI 兼容客户端完成，不引入 Spring AI。
 
 ### 3.3 后续阶段（仅记录，不实现）
 
 | 阶段 | 内容 | 对本期的影响 |
 | --- | --- | --- |
-| P3 | 用 Spring AI + `spring-ai-agent-utils` 的 `TaskTool` 实现 `SpringAiTaskOrchestrator`，替换 Mock | `TaskOrchestrator` 接口、SSE 层、持久化映射与前端零改动；必须预留 `// P3:` 注释位。 |
 | P4 | 运行中断点续传、跨进程恢复与更完整的历史检索 | 当前档案为只读；断点续传不在本期。 |
-| P5 | 多模型路由、子 Agent 隔离、失败降级 | 事件契约保留扩展空间。 |
+| P5 | 多模型路由、子 Agent 隔离、失败降级、远端沙箱 | 事件契约保留扩展空间。 |
 
 ### 3.4 假设与约束
 
@@ -288,13 +302,18 @@ SSE onerror
 
 | 编号 | 需求 | 级别 |
 | --- | --- | --- |
-| FR-RUN-01 | 提供 `POST /api/main-tasks`，按 `mockScript` 与可选 `goal` 创建主任务并启动运行，返回 `mainTaskId` 与 `runId`。 | MUST |
+| FR-RUN-01 | 提供 `POST /api/main-tasks`，按 `mockScript`、可选 `goal` 与可选 `workingDir` 创建主任务并启动运行，返回 `mainTaskId` 与 `runId`。 | MUST |
 | FR-RUN-02 | `mockScript` 必须属于允许列表：`happy-path`、`with-ambiguity`、`with-failure`、`with-noise`；未知值返回 400。 | MUST |
 | FR-RUN-03 | 创建主任务必须异步启动编排；HTTP 响应不得等待脚本执行完成。 | MUST |
 | FR-RUN-04 | 实时运行状态与事件保存在内存；主任务、子任务、提示词、中间结果与事件原文同步写入 MySQL。 | MUST |
 | FR-RUN-05 | 同一后端进程内，多次创建主任务互不干扰；`mainTaskId` 与 `runId` 全局唯一；可保存多个主任务并分别查询详情。 | MUST |
 | FR-RUN-06 | 运行具有 `RUNNING / COMPLETED / FAILED` 三种对外状态；首个终态事件生效后，后续终态事件忽略。 | MUST |
 | FR-RUN-07 | 提供 `GET /api/main-tasks?limit=N` 与 `GET /api/main-tasks/{mainTaskId}`，从 MySQL 返回主任务列表与详情；未知主任务返回 40403。 | MUST |
+| FR-RUN-08 | `workingDir` 可选；提供时必须是后端机器上存在的绝对/可解析目录。后端规范化为真实绝对路径后保存，不存在或不是目录返回 400 / 40004。 | MUST |
+| FR-RUN-09 | 创建响应、主任务列表与详情均返回 `workingDir`；未选择时为 `null`。 | MUST |
+| FR-RUN-10 | P3 真实执行必须由规划会话确认后通过 `RunService.createFromPlan` 启动；`mockScript` 为空时路由到 `CodingTaskOrchestrator`，非空时委托 Mock。 | MUST |
+| FR-RUN-11 | 真实执行前必须校验 Git（可执行、仓库根、非 detached HEAD、工作区干净），并获取仓库级工作区锁；同一仓库并发启动返回 409 / 40910。 | MUST |
+| FR-RUN-12 | 运行总超时 60 分钟；超时后回滚临时分支并以 `error` 终止，不得无限占用工作区锁。 | MUST |
 
 ### 5.2 SSE 通道（SSE）
 
@@ -311,6 +330,8 @@ SSE onerror
 | FR-SSE-09 | 响应头必须包含 `Cache-Control: no-cache`、`X-Accel-Buffering: no`，防止代理缓冲。 | MUST |
 | FR-SSE-10 | 运行不存在返回 404；`afterSeq` 非法（负数、非整数、大于 `lastSeq`）返回 400；均使用 JSON 包装体，不建立 SSE 流。 | MUST |
 | FR-SSE-11 | 心跳事件必须进入事件表并占用 seq，使 `afterSeq` 续传不会误判缺口。 | MUST |
+| FR-SSE-12 | 提供 `GET /api/main-tasks/plan-sessions/{id}/events?afterSeq=N` 规划 SSE；信封、心跳、补发与游标规则与运行 SSE 一致。 | MUST |
+| FR-SSE-13 | 规划会话事件写入 `tn_plan_session_event`，进程重启后可查询已落库会话与事件，但不可续跑。 | MUST |
 
 ### 5.3 事件契约（EVT）
 
@@ -319,7 +340,7 @@ SSE onerror
 | FR-EVT-01 | 所有事件使用统一信封：`eventId / runId / seq / type / timestamp / task / payload`。 | MUST |
 | FR-EVT-02 | `seq` 在同一运行内从 1 开始严格单调递增，任何事件（含心跳）都占用一个 seq。 | MUST |
 | FR-EVT-03 | `eventId` 默认由 seq 生成且运行内唯一；Mock 脚本可显式覆盖以模拟重复。 | MUST |
-| FR-EVT-04 | 必须实现第 6 章的 14 种事件类型与 payload 结构。 | MUST |
+| FR-EVT-04 | 必须实现第 6 章的 17 种事件类型与 payload 结构。 | MUST |
 | FR-EVT-05 | 消费端按 `eventId` 幂等：重复事件不重复应用，但游标仍必须跨过其 seq。 | MUST |
 | FR-EVT-06 | 消费端遇到未知 `type` 时记录日志并跳过语义，游标照常前进，不得卡死。 | MUST |
 | FR-EVT-07 | 检测到 seq 缺口并持续 2 秒未补齐时，前端必须主动拉快照恢复，不得静默等待。 | MUST |
@@ -337,19 +358,22 @@ SSE onerror
 | FR-DEC-04 | 任务不在 `WAITING_INPUT`、选项不存在、运行已结束时，分别返回 409；重复提交只有第一次被接受。 | MUST |
 | FR-DEC-05 | 不得为等待输入新开 SSE 连接，不得使用轮询，SSE 始终单向推送。 | MUST |
 | FR-DEC-06 | 前端提交后不得乐观改状态，必须等待 `input_received` 事件；提交失败展示错误并允许重试。 | MUST |
+| FR-DEC-07 | 抉择请求支持 `customInput`（≤4000 字）；与 `selectedOptionId` 至少提供一个；`allowCustom=false` 时拒绝自由输入。 | MUST |
+| FR-DEC-08 | 主任务、子任务、规划 Agent 均通过 `waiting_input` 提问；规划会话使用 `POST /api/main-tasks/plan-sessions/{id}/inputs`。 | MUST |
+| FR-DEC-09 | 自由输入不能绕过选项校验；选择选项时可附带补充说明，Agent 同时收到两者。 | MUST |
 
 ### 5.5 Mock 编排（MOCK）
 
 | 编号 | 需求 | 级别 |
 | --- | --- | --- |
-| FR-MOCK-01 | 定义 `TaskOrchestrator` 接口：`start(runId, request)`、`submitInput(runId, taskId, optionId)`；本阶段唯一实现为 `MockTaskOrchestrator`。 | MUST |
+| FR-MOCK-01 | 定义 `TaskOrchestrator` 接口：`start(runId, request)`、`submitInput(runId, taskId, optionId)`；Mock 实现为 `MockTaskOrchestrator`，真实实现为 `CodingTaskOrchestrator`。 | MUST |
 | FR-MOCK-02 | 从 `classpath:mock/{script}.json` 读取脚本；脚本名只允许允许列表，禁止路径拼接。 | MUST |
 | FR-MOCK-03 | 按每条事件的 `delayMs` 顺序产生事件；事件先写入内存事件表，再进入推送队列。 | MUST |
 | FR-MOCK-04 | 遇到 `waiting_input` 时挂起当前运行的后续执行，直到 `submitInput` 被调用；其他运行不受影响。 | MUST |
 | FR-MOCK-05 | 提供 4 个脚本并覆盖：两层成功结构、等待输入双分支、可重试失败、噪声（重复/乱序/延迟/丢投递）。 | MUST |
 | FR-MOCK-06 | 脚本可按 `taskId` 自动补全 `task` 元数据；显式 `task` 优先，但不得与 `plan` 冲突。 | MUST |
 | FR-MOCK-07 | 脚本加载时必须校验：事件类型、必填 payload、两层结构（子任务必须直接挂在根任务下）、父引用、选项与分支覆盖、延迟范围。 | MUST |
-| FR-MOCK-08 | 必须保留 `// P3: 替换为 SpringAiTaskOrchestrator` 注释位；接口与事件契约不得包含 Mock 专有字段。 | MUST |
+| FR-MOCK-08 | Mock 请求必须委托给 `MockTaskOrchestrator`；接口与事件契约不得包含 Mock 专有字段，真实实现不得依赖脚本。 | MUST |
 | FR-MOCK-09 | `input_received` 与 `heartbeat` 禁止写在脚本中，分别由编排器和 SSE 层生成。 | MUST |
 
 ### 5.6 前端工作台（FE）
@@ -374,6 +398,16 @@ SSE onerror
 | FR-FE-16 | 交互必须可键盘操作；状态图标有 aria-label；遵循 `prefers-reduced-motion`。 | SHOULD |
 | FR-FE-17 | 顶部提供「主任务库」入口，列出多个已持久化主任务；打开后展示其子任务、提示词、中间结果与事件账本，并明确标注只读。 | MUST |
 | FR-FE-18 | 档案模式下禁用抉择提交与模拟断线，不允许建立 SSE；用户可退出档案并新建主任务。 | MUST |
+| FR-FE-19 | 创建面板提供只读工作目录输入与“选择目录”按钮；目录选择弹窗展示当前路径、父目录、根目录与子文件夹，只列目录不列文件，确认后回填绝对路径。 | MUST |
+| FR-FE-20 | 顶部提供“LLM 设置”入口；弹窗包含 Base URL、API Key 来源单选（直接写入 / 环境变量）与对应输入；保存后提示已立即生效，literal 密钥只展示掩码。 | MUST |
+| FR-FE-21 | 任务工作区头部展示工作目录；未指定时显示“未指定工作目录”，档案模式同样可见。 | MUST |
+| FR-FE-22 | 创建流程必须先建立规划会话：连接规划 SSE，展示规划思考与工具调用，`READY` 后展示计划表；确认前不得创建主任务。 | MUST |
+| FR-FE-23 | 规划会话支持按提示修订、确认、取消；`waiting_input` 时展示问题、选项与自由输入框，提交后等待 `input_received`。 | MUST |
+| FR-FE-24 | 工作目录选择器必须提示并校验 Git 仓库根目录；目录不是仓库或工作区不干净时展示后端错误，不进入规划。 | MUST |
+| FR-FE-25 | 子任务展示 `REVIEWING` / `CANCELLED` 状态；工作区提供审核结论面板（verdict、问题列表、测试证据）与 Git 时间线（分支、提交、合并、回滚）。 | MUST |
+| FR-FE-26 | 计划表展示 `revision`、重排原因与 `changedTaskIds`；重排后刷新行与依赖，不重置已完成子任务的局部状态。 | MUST |
+| FR-FE-27 | 设置弹窗分为“LLM 连接”与“Agent 审核”两个页签；审核页签包含开关与最大重做次数（0–5）。 | MUST |
+| FR-FE-28 | 无模型配置、模型不可用、规划失败时展示明确错误与修复入口（打开设置 / 重试 / 取消），不得白屏。 | MUST |
 
 ### 5.7 前端状态机（STORE）
 
@@ -390,6 +424,11 @@ SSE onerror
 | FR-STORE-09 | 运行终态时，所有未完成任务在客户端修复为 `FAILED`（合成错误文案），保证 UI 无悬空状态。 | MUST |
 | FR-STORE-10 | 提供派生数据：主任务、子任务列表、选中节点、待办抉择、子任务统计、去重/缺口告警计数。 | MUST |
 | FR-STORE-11 | 提供主任务库状态：列表、加载中、错误、当前档案；打开档案时重建事件账本但禁止 SSE 与提交抉择。 | MUST |
+| FR-STORE-12 | 提供规划会话状态：`planSessionId`、状态、计划、最后 seq、连接状态、待办抉择；规划与运行状态互斥。 | MUST |
+| FR-STORE-13 | 应用 `review_started` → `REVIEWING`、`review_completed` → `RETRYING`（REWORK）；保存最近一次审核结论与测试证据。 | MUST |
+| FR-STORE-14 | 应用 `git_checkpoint` 维护按任务分组的 Git 时间线，不改变任务状态；重复事件按 `eventId` 去重。 | MUST |
+| FR-STORE-15 | 应用重排后的 `plan`：保留已有节点状态，新增任务为 `PENDING`，被移除的 `PENDING` 任务为 `CANCELLED`。 | MUST |
+| FR-STORE-16 | 抉择状态保存 `allowCustom` / `customPlaceholder` 与已提交的自由输入，重置运行或切换会话时清空。 | MUST |
 
 ### 5.8 持久化（DB）
 
@@ -404,7 +443,14 @@ SSE onerror
 | FR-DB-07 | 每条事件在内存投影后同步落库；落库失败记录日志，但不得阻断 SSE 推送或让前端崩溃。 | MUST |
 | FR-DB-08 | 主任务失败直接 `FAILED`；子任务 `retryable=true` 落为 `RETRYING`，重试成功后为 `SUCCESS`。 | MUST |
 | FR-DB-09 | 进程重启后实时运行不可恢复，但已落库的主任务列表与详情必须仍可查询。 | MUST |
-| FR-DB-10 | 连接信息只从环境变量读取；`schema.sql` 必须同时兼容 MySQL 与 H2（MODE=MySQL）。 | MUST |
+| FR-DB-10 | MySQL 连接信息只从 `TASKNEST_MYSQL_*` / `MYSQL_*` 环境变量读取；`schema.sql` 必须同时兼容 MySQL 与 H2（MODE=MySQL）。 | MUST |
+| FR-DB-11 | `tn_main_task_workspace` 与主任务一对一保存 `working_dir`；未选择目录时不写行。 | MUST |
+| FR-DB-12 | `tn_llm_setting` 为单例表（`id=1`），保存 Base URL、`api_key_type`（`LITERAL` / `ENV`）与值；ENV 模式的值是环境变量名。 | MUST |
+| FR-DB-13 | 应用启动时必须自动读取 LLM 设置；保存成功后必须在同一请求内更新运行时快照。读取接口不得返回 literal 密钥明文，日志不得输出密钥。 | MUST |
+| FR-DB-14 | `tn_plan_session` / `tn_plan_session_event` 保存规划会话状态与事件原文；`(plan_session_id, seq)` 唯一。 | MUST |
+| FR-DB-15 | `tn_agent_setting` 为单例表（`id=1`），保存 `review_enabled` 与 `review_max_reworks`；启动加载，保存后热更新。 | MUST |
+| FR-DB-16 | `tn_task_review` 保存每次审核结论、问题 JSON、测试证据与耗时，`(main_task_id, task_id, attempt)` 唯一。 | MUST |
+| FR-DB-17 | 新增表继续使用 `CREATE TABLE IF NOT EXISTS`，同时兼容 MySQL 8 与 H2（MODE=MySQL）；不得修改既有表列。 | MUST |
 
 ### 5.9 SSE 客户端（CLIENT）
 
@@ -418,6 +464,90 @@ SSE onerror
 | FR-CLIENT-06 | 组件卸载、开始新运行、运行终态、运行丢失时必须关闭连接并取消定时器。 | MUST |
 | FR-CLIENT-07 | 运行处于终态时不得再重连；连接关闭视为正常结束。 | MUST |
 | FR-CLIENT-08 | 禁止依赖浏览器原生自动重连（它会丢失 `afterSeq`）；出错时必须主动 `close()` 后自行调度。 | MUST |
+
+### 5.10 本地目录浏览（FS）
+
+| 编号 | 需求 | 级别 |
+| --- | --- | --- |
+| FR-FS-01 | 提供 `GET /api/fs/directories?path=...&showHidden=false`，默认从用户主目录开始浏览。 | MUST |
+| FR-FS-02 | 返回当前规范化绝对路径、父目录、当前目录名、本机根目录列表、子文件夹列表与截断标记。 | MUST |
+| FR-FS-03 | 只返回目录，不读取或返回文件内容；默认过滤隐藏目录，可按参数包含。 | MUST |
+| FR-FS-04 | 路径不存在、不是目录或格式非法返回 400 / 40004；无权限读取返回 400 / 40005。 | MUST |
+| FR-FS-05 | 单目录最多返回 500 个文件夹，超出时置 `truncated=true`，前端提示可直接输入路径跳转。 | SHOULD |
+
+### 5.11 LLM 设置（SET）
+
+| 编号 | 需求 | 级别 |
+| --- | --- | --- |
+| FR-SET-01 | 提供 `GET /api/settings/llm`，返回 Base URL、模型名称、Key 类型、环境变量名或掩码、配置状态、环境变量解析状态与更新时间。 | MUST |
+| FR-SET-02 | 提供 `PUT /api/settings/llm`，body 为 `{baseUrl, modelName, apiKeyType, apiKeyValue?}`；`apiKeyType` 只允许 `LITERAL` / `ENV`。 | MUST |
+| FR-SET-03 | Base URL 必须是完整 `http/https` 地址；`modelName` 必填、自由文本、最多 128 字；ENV 模式的变量名必须符合 `[A-Za-z_][A-Za-z0-9_]*`。 | MUST |
+| FR-SET-04 | LITERAL 模式提交空白值表示沿用已保存密钥；没有已保存密钥时返回 400 / 40001。 | MUST |
+| FR-SET-05 | 设置写入 MySQL 后立即替换 volatile 运行时快照；进程重启时从数据库自动加载。 | MUST |
+| FR-SET-06 | `GET` 对 LITERAL 只返回 `apiKeyValue=null` 与末四位掩码；ENV 返回变量名并实时解析 `envResolved`。 | MUST |
+| FR-SET-07 | 设置是真实模型请求的唯一来源；规划、子 Agent、审核与汇总均读取当前运行时快照。 | MUST |
+| FR-SET-08 | `modelName` 是必填的自由文本模型 ID，默认 `gpt-4o`；保存时去除首尾空白，不能为空且最多 128 字。 | MUST |
+
+### 5.12 规划会话（PLAN）
+
+| 编号 | 需求 | 级别 |
+| --- | --- | --- |
+| FR-PLAN-01 | 提供 7.3.6 的七个规划会话接口；确认前不得创建主任务。 | MUST |
+| FR-PLAN-02 | 规划会话必须持有仓库工作区锁，确认/取消/失败时释放；同一仓库并发规划或运行返回 409 / 40910。 | MUST |
+| FR-PLAN-03 | 规划 Agent 使用 `PLANNING` 工具模式：只读文件工具与 `ask_user`，不得写文件或执行 shell。 | MUST |
+| FR-PLAN-04 | 规划输出必须是两层计划：一个根任务 + 直接子任务；子任务含 `description`、`acceptanceCriteria`、`allowedTools`、`testCommand`。 | MUST |
+| FR-PLAN-05 | 计划不合法（层级、ID、依赖、字段）时返回 `error(PLAN_INVALID_OUTPUT)`，不得进入 `READY`。 | MUST |
+| FR-PLAN-06 | `READY` 后可反复修订，`revision` 递增；确认响应返回 `planVersion`。 | MUST |
+| FR-PLAN-07 | Mock 模式（传入 `mockScript`）不调用模型，直接生成可确认计划，保证离线演示。 | MUST |
+
+### 5.13 Agent 执行与工具（AGENT）
+
+| 编号 | 需求 | 级别 |
+| --- | --- | --- |
+| FR-AGENT-01 | 主 Agent 负责汇总与动态重排；子 Agent 在独立分支实现单个子任务；审核 Agent 独立审核并跑测试。 | MUST |
+| FR-AGENT-02 | 工具集合：`fs.list`、`fs.find`、`fs.read`、`fs.write`、`fs.create`、`shell.exec`、`ask_user`；模型通过 OpenAI 兼容函数调用触发。 | MUST |
+| FR-AGENT-03 | 所有文件工具必须限制在工作区内，拒绝敏感路径（`.env`、私钥、`.ssh`、`.aws`、`.git` 等）与越界路径。 | MUST |
+| FR-AGENT-04 | `shell.exec` 仅本地执行，危险命令由 `CommandPolicy` 拦截并产生 `tool_result(error)`；不得联网拉取或推送。 | MUST |
+| FR-AGENT-05 | 子任务按 `dependsOn` 串行调度；依赖未成功前不得开始；依赖失败则后续任务不执行。 | MUST |
+| FR-AGENT-06 | 子 Agent 每次尝试最多 40 轮工具调用；超过上限按可重试失败处理。 | MUST |
+| FR-AGENT-07 | Agent 遇到歧义必须调用 `ask_user`，映射为 `waiting_input` 并阻塞至用户提交。 | MUST |
+| FR-AGENT-08 | 单个子任务失败不终止整个运行；达到重做上限后标记 `FAILED` 并继续可执行任务，最终由主 Agent 汇总。 | MUST |
+| FR-AGENT-09 | 动态重排只允许修改/删除 `PENDING` 任务；新增任务不得依赖被取消任务；重排失败保留原计划并记录日志。 | MUST |
+
+### 5.14 Git 版本管理（GIT）
+
+| 编号 | 需求 | 级别 |
+| --- | --- | --- |
+| FR-GIT-01 | 运行开始时从原始分支创建 `tasknest/<mainTaskId>`；子任务每次尝试创建 `tasknest/subtasks/<mainTaskId>/<taskId>-a<attempt>`，与主任务分支保持同级，避免 Git ref 文件 / 目录冲突。 | MUST |
+| FR-GIT-02 | 子任务成功后以 `--no-ff` 合并回主任务分支并删除子分支；失败/重做时丢弃子分支。 | MUST |
+| FR-GIT-03 | 全部子任务完成后主任务分支以 `--no-ff` 合并回原始分支并删除主任务分支。 | MUST |
+| FR-GIT-04 | 合并冲突时保留主任务与子任务分支，发布 `git_checkpoint` 与 `error(GIT_MERGE_CONFLICT)`，不得强推或自动解决。 | MUST |
+| FR-GIT-05 | 非冲突失败回滚主任务分支、恢复原始分支并发布 `rolled_back`；回滚失败以 `GIT_ROLLBACK_FAILED` 终止。 | MUST |
+| FR-GIT-06 | 每个分支/提交/合并/回滚动作发布 `git_checkpoint`；提交使用内部身份并跳过钩子。 | MUST |
+| FR-GIT-07 | 只允许本地 Git；禁止 fetch / pull / push / remote / force push；Agent 只能执行只读 Git 查询。 | MUST |
+
+### 5.15 审核 Agent（REVIEW）
+
+| 编号 | 需求 | 级别 |
+| --- | --- | --- |
+| FR-REVIEW-01 | 审核开关与最大重做次数由 `/api/settings/agent` 控制；默认开启、最多重做 2 次。 | MUST |
+| FR-REVIEW-02 | 审核 Agent 无写文件工具，只能只读文件、受限 shell 与 `ask_user`；shell 仅允许测试/lint/build/类型检查/只读 Git。 | MUST |
+| FR-REVIEW-03 | 平台先独立运行测试命令（计划 `testCommand`，`none` 时自动探测），再让审核 Agent 给出结论。 | MUST |
+| FR-REVIEW-04 | 审核输出严格 JSON：`verdict`（PASS/REWORK）、`issues[]`（BLOCKER/MAJOR/MINOR）、`testStatus`、`testEvidence[]`。 | MUST |
+| FR-REVIEW-05 | 平台测试证据优先：测试失败、超时或出现未提交副作用时强制 REWORK；模型输出冲突时以平台为准。 | MUST |
+| FR-REVIEW-06 | 审核测试超时 10 分钟；LLM/解析失败重试一次，仍失败按 `REVIEW_UNAVAILABLE` 终止该子任务。 | MUST |
+| FR-REVIEW-07 | REWORK 时删除子任务分支、携带审核意见重做；超过上限发布 `task_failed(retryable=false)`。 | MUST |
+| FR-REVIEW-08 | 每次审核发布 `review_started` 与 `review_completed`，并写入 `tn_task_review`。 | MUST |
+
+### 5.16 Agent 设置与安全（SAFE）
+
+| 编号 | 需求 | 级别 |
+| --- | --- | --- |
+| FR-SAFE-01 | 密钥不得出现在日志、事件、提示词快照或 API 响应中；工具环境变量只注入解析后的密钥。 | MUST |
+| FR-SAFE-02 | 文件工具与工作区锁都以 Git 仓库根为边界；路径解析必须防止 `..` 与符号链接逃逸。 | MUST |
+| FR-SAFE-03 | 不实现 token / 成本预算；单任务以轮数与总时长限制兜底。 | MUST |
+| FR-SAFE-04 | P3 不使用 Spring AI `ChatClient` / `TaskTool`；使用项目内 OpenAI 兼容客户端。 | MUST |
+| FR-SAFE-05 | 前端不得展示 literal 密钥；设置保存后只显示掩码。 | MUST |
 
 ---
 
@@ -449,7 +579,7 @@ SSE onerror
 | `eventId` | string | 是 | 默认 `evt_` + 6 位以上零填充 seq；运行内唯一（噪声脚本可故意重复）。 |
 | `runId` | string | 是 | 格式 `run_yyyyMMdd_HHmmss_<6位十六进制>`，全局唯一。 |
 | `seq` | integer (int64) | 是 | 从 1 开始，运行内严格单调递增；所有事件（含 heartbeat）都占用 seq。 |
-| `type` | string | 是 | 第 6.3 节的 14 种小写下划线值之一。 |
+| `type` | string | 是 | 第 6.3 节的 17 种小写下划线值之一。 |
 | `timestamp` | string | 是 | UTC ISO-8601，毫秒精度；服务端生成，不参与排序。 |
 | `task` | object \| null | 是 | 任务相关事件必须非 null；`run_started / run_completed / heartbeat / error` 为 null。 |
 | `payload` | object | 是 | 无有效载荷时序列化为 `{}`，不得省略。 |
@@ -492,10 +622,13 @@ data: {"eventId":"evt_000123","runId":"run_20261021_100000_a1b2c3","seq":123,"ty
 | `prompt_assembled` | 提示词拼接完成 | 任务 | `systemPrompt`, `userPrompt`, `contextSnippets[]`, `finalPrompt` |
 | `tool_call` | 工具调用发起 | 任务 | `toolName`, `arguments`, 可选 `callId` |
 | `tool_result` | 工具返回 | 任务 | `toolName`, `status`, `result`, `durationMs`, 可选 `callId` |
-| `waiting_input` | 等待用户抉择，任务暂停 | 任务 | `question`, `options[]` |
-| `input_received` | 用户抉择已提交 | 任务 | `selectedOptionId` |
+| `waiting_input` | 等待用户抉择，任务暂停 | 任务 | `question`, `options[]`, `allowCustom`, `customPlaceholder` |
+| `input_received` | 用户抉择已提交 | 任务 | `selectedOptionId`, `customInput` |
 | `task_completed` | 子任务完成 | 任务 | `summary` (string) |
-| `task_failed` | 子任务失败 | 任务 | `error` (string), `retryable` (boolean) |
+| `task_failed` | 子任务失败/等待重做 | 任务 | `error` (string), `retryable` (boolean) |
+| `review_started` | 审核开始 | 任务 | `attempt` (number) |
+| `review_completed` | 审核结论 | 任务 | `attempt`, `verdict`, `summary`, `issues[]`, `testStatus`, `testEvidence[]`, `modelName`, `durationMs` |
+| `git_checkpoint` | Git 分支/提交/合并/回滚 | 任务 | `action`, `branch`, `targetBranch`, `commit`, `attempt`, `noChanges`, `message` |
 | `run_completed` | 全部完成 | null | `summary` (string) |
 | `error` | 系统级错误 | null | `code` (string), `message` (string) |
 | `heartbeat` | 保活，连接后立即一次，之后约每 15s | null | `{}` |
@@ -514,21 +647,45 @@ data: {"eventId":"evt_000123","runId":"run_20261021_100000_a1b2c3","seq":123,"ty
 
 ```json
 {
+  "revision": 1,
+  "reason": null,
+  "changedTaskIds": null,
   "tasks": [
-    { "taskId": "t_root",  "parentTaskId": null,      "title": "生成订单服务接口文档", "agentName": "lead",      "dependsOn": [] },
-    { "taskId": "t_scan",  "parentTaskId": "t_root",  "title": "扫描 Controller",      "agentName": "scanner",   "dependsOn": [] },
-    { "taskId": "t_list",  "parentTaskId": "t_root",  "title": "抽取接口清单",         "agentName": "extractor", "dependsOn": ["t_scan"] },
-    { "taskId": "t_merge", "parentTaskId": "t_root",  "title": "合并接口参数",         "agentName": "merger",    "dependsOn": ["t_list"] }
+    {
+      "taskId": "t_root", "parentTaskId": null, "title": "生成订单服务接口文档",
+      "agentName": "lead", "dependsOn": [],
+      "description": null, "acceptanceCriteria": null,
+      "allowedTools": null, "testCommand": null
+    },
+    {
+      "taskId": "t_scan", "parentTaskId": "t_root", "title": "扫描 Controller",
+      "agentName": "scanner", "dependsOn": [],
+      "description": "列出所有 Controller 与路由",
+      "acceptanceCriteria": ["列出全部路由"],
+      "allowedTools": ["fs.list", "fs.find", "fs.read"],
+      "testCommand": "none"
+    },
+    {
+      "taskId": "t_list", "parentTaskId": "t_root", "title": "抽取接口清单",
+      "agentName": "extractor", "dependsOn": ["t_scan"],
+      "description": "从 Controller 抽取接口参数与返回",
+      "acceptanceCriteria": ["每个接口都有参数与返回"],
+      "allowedTools": ["fs.read", "fs.write"],
+      "testCommand": "mvn test"
+    }
   ]
 }
 ```
 
-- `tasks` 必须包含**完整两层结构，包括根任务**；根任务 `parentTaskId=null`，且每份脚本恰好一个根。
-- 除根任务外，所有任务都必须直接挂在根任务下；出现更深层级时脚本加载失败。
-- `taskId` 在运行内唯一；父引用必须存在；不得成环。
-- `dependsOn` 为任务 ID 数组，可以为空；本阶段仅用于展示，不参与调度。
+- `tasks` 必须包含**完整两层结构，包括根任务**；根任务 `parentTaskId=null`，且恰好一个根。
+- 除根任务外，所有任务都必须直接挂在根任务下；更深层级直接失败。
+- `taskId` 在运行内唯一；父引用必须存在；依赖不得成环。
+- `dependsOn` 为任务 ID 数组，可以为空；真实编排按依赖顺序串行调度，Mock 仅展示。
+- P3 字段：`description`、`acceptanceCriteria`、`allowedTools`、`testCommand` 均可为 `null`
+  （Mock 兼容）；真实规划器必须提供前两项。
 - 信封中的 `task` 为根任务引用。
-- 同一运行本阶段只允许出现一次 `plan`，且必须早于任何任务事件。
+- 执行开始时发送一次 `plan`；动态重排时再次发送，`revision` 递增并携带
+  `reason` / `changedTaskIds`。重排只允许动 `PENDING` 任务。
 - 根任务投影为主任务，直属子任务投影为子任务；前端固定渲染两层。
 
 #### 6.4.3 `task_started`
@@ -606,22 +763,29 @@ data: {"eventId":"evt_000123","runId":"run_20261021_100000_a1b2c3","seq":123,"ty
   "options": [
     { "id": "local-first", "label": "本地优先", "description": "实现快、无账号依赖；多设备之间需要手动迁移缓存。" },
     { "id": "cloud-sync",  "label": "云端同步", "description": "多设备自动同步；需要账号与网络。" }
-  ]
+  ],
+  "allowCustom": true,
+  "customPlaceholder": "也可以直接描述你的选择……"
 }
 ```
 
 - `question` 非空。
 - `options` 至少 2 个；`id` 非空且同一事件内唯一；`label` 非空；`description` 可为空字符串。
-- 推送后该任务暂停；SSE 保持连接；心跳继续。
+- `allowCustom` 可选 boolean，缺省为 `true`；为 `false` 时前端禁用自由输入。
+- `customPlaceholder` 可选 string，仅在允许自由输入时展示。
+- 主任务、子任务与规划会话均可发出；推送后对应任务暂停，SSE 保持连接，心跳继续。
+- 规划会话中该事件属于 `plan_root` 合成根任务。
 
 #### 6.4.9 `input_received`
 
 ```json
-{ "selectedOptionId": "local-first" }
+{ "selectedOptionId": "local-first", "customInput": null }
 ```
 
 - 只能由编排器在 `submitInput` 校验通过后生成；脚本禁止包含。
-- `selectedOptionId` 必须匹配该任务当前 `waiting_input.options[].id`。
+- `selectedOptionId` 与 `customInput` 至少一个非空；`selectedOptionId` 必须匹配该任务当前
+  `waiting_input.options[].id`（自定义输入时为 `null`）。
+- `customInput` 为自由文本，最长 4000 字；选择选项时可同时附带补充说明。
 
 #### 6.4.10 `task_completed`
 
@@ -671,6 +835,61 @@ data: {"eventId":"evt_000123","runId":"run_20261021_100000_a1b2c3","seq":123,"ty
 - 仅当该运行至少有一个订阅者时产生；最后一个订阅者断开后停止产生。
 - 客户端默认不在事件日志展示，不参与任务状态，但参与 seq 缺口检测。
 
+#### 6.4.15 `review_started`
+
+```json
+{ "attempt": 1 }
+```
+
+- `task` 为被审核的子任务；`attempt` 为当前尝试序号（从 1 开始）。
+- 仅在开启 `reviewEnabled` 时出现；紧接着子任务提交后发送。
+
+#### 6.4.16 `review_completed`
+
+```json
+{
+  "attempt": 1,
+  "verdict": "REWORK",
+  "summary": "缓存失效逻辑不完整。",
+  "issues": [
+    { "severity": "MAJOR", "file": "src/cache.ts", "line": 42,
+      "message": "缺少失效回退逻辑", "suggestion": "补充 stale 分支" }
+  ],
+  "testStatus": "PASSED",
+  "testEvidence": [
+    { "command": "npm test", "exitCode": 0, "timedOut": false, "summary": "42 passed" }
+  ],
+  "modelName": "gpt-4o",
+  "durationMs": 18342
+}
+```
+
+- `verdict` 只能是 `PASS` / `REWORK`；`testStatus` 只能是 `PASSED` / `FAILED` / `UNAVAILABLE`。
+- 平台测试证据优先于模型自述：平台测试失败或出现未提交的副作用一律强制 `REWORK`。
+- `issues[].severity` 为 `BLOCKER` / `MAJOR` / `MINOR`；`file`、`line`、`suggestion` 可空。
+- `testEvidence[].exitCode` 在超时或不可用时可为 `null`。
+- `REWORK` 后子任务回到 `RUNNING` 重试（新分支、`attempt+1`），超过上限则 `task_failed`。
+
+#### 6.4.17 `git_checkpoint`
+
+```json
+{
+  "action": "branch_created",
+  "branch": "tasknest/subtasks/mt_.../t_impl-a1",
+  "targetBranch": null,
+  "commit": null,
+  "attempt": 1,
+  "noChanges": false,
+  "message": "创建子任务分支（第 1 次尝试）"
+}
+```
+
+- `action`：`branch_created` / `committed` / `merged` / `rolled_back` / `branch_deleted`。
+- `targetBranch` 仅在 `merged` / `rolled_back` 时填写；`commit` 为短 SHA，可为空。
+- `attempt` 仅子任务分支事件携带；主任务分支事件为 `null`。
+- `noChanges=true` 表示工作区无变化，未创建空提交。
+- Git 操作由编排器独占；Agent 只能通过 `shell.exec` 执行只读 Git 命令。
+
 ### 6.5 序号、去重与游标规则
 
 1. **分配**：所有事件由 `EventPublisher` 在产生时原子分配 seq；心跳也走同一分配器。
@@ -709,8 +928,13 @@ data: {"eventId":"evt_000123","runId":"run_20261021_100000_a1b2c3","seq":123,"ty
 | `RUNNING` | 正在执行 | 执行中 |
 | `WAITING_INPUT` | 等待用户抉择 | 等待输入 |
 | `RETRYING` | 可重试失败，等待重试 | 重试中 |
-| `SUCCESS` | 成功完成 | 成功 |
+| `REVIEWING` | 已提交，审核 Agent 正在检查 | 审核中 |
+| `SUCCESS` | 成功完成并已合并 | 成功 |
 | `FAILED` | 最终失败 | 失败 |
+| `CANCELLED` | 动态重排移除，不再执行 | 已取消 |
+
+`CANCELLED` 只由动态重排产生，且只能移除仍为 `PENDING` 的子任务；进入终态的
+`SUCCESS` / `FAILED` 不可再取消。
 
 #### 6.6.3 主任务状态迁移
 
@@ -740,9 +964,14 @@ data: {"eventId":"evt_000123","runId":"run_20261021_100000_a1b2c3","seq":123,"ty
 | `RUNNING` / `WAITING_INPUT` | `task_failed` (`retryable=true`) | `RETRYING` | 记录错误，不终止运行。 |
 | `RETRYING` | `task_started` | `RUNNING` | 重试开始。 |
 | `RETRYING` | `task_failed` (`retryable=true`) | `RETRYING` | 允许多次重试，保留最近一次错误。 |
-| `RUNNING` / `WAITING_INPUT` / `RETRYING` | `task_failed` (`retryable=false`) | `FAILED` | 终态。 |
-| `RUNNING` | `task_completed` | `SUCCESS` | 记录 summary。 |
-| `SUCCESS` / `FAILED` | 任何任务状态类事件 | 不变 | 记录警告；游标继续推进。 |
+| `RUNNING` / `WAITING_INPUT` / `RETRYING` | `review_started` | `REVIEWING` | 子任务已提交，等待审核结论。 |
+| `REVIEWING` | `review_completed` (`verdict=PASS`) | `REVIEWING` | 保持审核中，随后由 `task_completed` 收尾。 |
+| `REVIEWING` | `review_completed` (`verdict=REWORK`) | `RETRYING` | 等待重做；编排器随后发送 `task_failed(retryable=true)`。 |
+| `REVIEWING` | `task_failed` (`retryable=true`) | `RETRYING` | 审核退回或审核不可用后重试。 |
+| `RUNNING` / `WAITING_INPUT` / `RETRYING` / `REVIEWING` | `task_failed` (`retryable=false`) | `FAILED` | 终态。 |
+| `RUNNING` / `REVIEWING` | `task_completed` | `SUCCESS` | 记录 summary；完成后分支已合并。 |
+| `PENDING` | `plan`（重排，任务被移除） | `CANCELLED` | 只有 `PENDING` 可被取消；记录原因。 |
+| `SUCCESS` / `FAILED` / `CANCELLED` | 任何任务状态类事件 | 不变 | 记录警告；游标继续推进。 |
 | 任意非终态 | `run_completed` | `FAILED` | 服务端/客户端修复，合成错误“运行已完成但该子任务未完成”。 |
 | 任意非终态 | `error` | `FAILED` | 合成错误使用 `error.message`。 |
 
@@ -754,6 +983,13 @@ data: {"eventId":"evt_000123","runId":"run_20261021_100000_a1b2c3","seq":123,"ty
 - 主任务状态不做隐式聚合；脚本必须为主任务发送自己的开始/完成事件。
 - 终态任务不再接受新的详情事件（忽略并记录）。
 - 主任务与子任务分别投影、分别持久化到 `tn_main_task` 与 `tn_subtask`，前端也分别渲染状态标签。
+- `git_checkpoint` 不改变任务状态，只记录分支/提交/合并/回滚时间线；分支操作失败由
+  `task_failed` 或 `error` 表达。
+- 审核被退回时：`review_completed(REWORK)` 先把子任务置为 `RETRYING`，随后
+  `task_failed(retryable=true)` 重申重试；达到上限则 `task_failed(retryable=false)`。
+- 动态重排只在两个子任务之间发生；重排不会重新运行 `SUCCESS`，也不会复活 `FAILED`。
+- 合并冲突保留主任务分支与子任务分支，运行以 `error(GIT_MERGE_CONFLICT)` 终止；
+  其他失败回滚主任务分支并恢复原始分支。
 
 #### 6.6.5 运行状态
 
@@ -810,14 +1046,41 @@ data: {"eventId":"evt_000123","runId":"run_20261021_100000_a1b2c3","seq":123,"ty
 | `40001` | 400 | 参数校验失败（缺字段、类型错误、格式错误） |
 | `40002` | 400 | `afterSeq` 非法（负数、非整数或大于当前 `lastSeq`） |
 | `40003` | 400 | `mockScript` 不在允许列表 |
+| `40004` | 400 | 工作目录 / 浏览路径不存在、不是目录或格式非法 |
+| `40005` | 400 | 目录不可读取（权限或 IO 错误） |
+| `40006` | 400 | 抉择提交不合法（选项与自由输入均缺失等） |
+| `40010` | 400 | 本机找不到可执行的 git |
+| `40011` | 400 | 工作目录不是 Git 仓库 |
+| `40012` | 400 | 工作目录不是 Git 仓库根目录 |
+| `40013` | 400 | Git 处于 detached HEAD |
+| `40014` | 400 | Git 工作区存在未提交改动 |
 | `40401` | 404 | 运行不存在（含后端重启后丢失） |
 | `40402` | 404 | 任务不存在 |
 | `40403` | 404 | 主任务档案不存在 |
+| `40404` | 404 | 主任务没有保存计划表 |
+| `40405` | 404 | 规划会话不存在 |
 | `40901` | 409 | 任务当前不处于等待输入状态（含重复提交） |
 | `40902` | 409 | 抉择选项无效 |
 | `40903` | 409 | 运行已结束 |
+| `40904` | 409 | 运行已结束，计划表只读 |
+| `40905` | 409 | 规划会话正在运行，不能并发修订 |
+| `40906` | 409 | 规划会话尚未就绪（无计划可确认） |
+| `40907` | 409 | 动态重排不合法（改动非 PENDING 任务、依赖悬空或成环） |
+| `40910` | 409 | 同一仓库已有活动运行 / 规划会话 |
+| `40911` | 409 | 运行期间 Git 分支被外部切换 |
+| `40912` | 409 | Git 合并冲突，分支已保留 |
 | `50001` | 500 | 服务内部错误 |
 | `50002` | 500 | 内置 Mock 脚本无效或缺失 |
+| `50010` / `50011` / `50012` | 500 | Git 分支创建 / 提交 / 回滚失败 |
+| `50020` | 500 | 规划 Agent 执行失败 |
+| `50201` | 502 | 模型请求失败 |
+| `50202` | 502 | 模型不支持工具调用 |
+| `50301` | 503 | 规划 Agent 不可用 |
+
+`error` 事件与 `task_failed.error` 中还可能出现 Agent 字符串错误码：
+`SUBAGENT_FAILED`、`REVIEW_REJECTED`、`REVIEW_UNAVAILABLE`、`REVIEW_INVALID_OUTPUT`、
+`REVIEW_SIDE_EFFECT`、`PLAN_INVALID_OUTPUT`、`TOOL_BLOCKED`、`LLM_REQUEST_FAILED`。
+前端按字符串展示即可，不映射为 HTTP 码。
 
 错误响应示例：
 
@@ -831,8 +1094,10 @@ data: {"eventId":"evt_000123","runId":"run_20261021_100000_a1b2c3","seq":123,"ty
 
 ### 7.3 创建主任务与运行
 
-主入口是 `POST /api/main-tasks`。每次创建都会先写入一条 `PENDING` 主任务，再启动一次运行；
-`POST /api/runs` 保留为兼容入口，行为等价于不带 `goal` 的创建主任务。
+P3 真实执行的主入口是**规划会话**（7.3.6）：先通过 SSE 完成需求澄清与计划确认，
+再由 `POST /api/main-tasks/plan-sessions/{id}/confirm` 创建主任务并启动
+`CodingTaskOrchestrator`。`POST /api/main-tasks` 与 `POST /api/runs` 保留给 Mock 脚本，
+行为不变；每次创建都会先写入一条 `PENDING` 主任务，再启动一次运行。
 
 #### 7.3.1 创建主任务
 
@@ -847,6 +1112,7 @@ Content-Type: application/json
 {
   "mockScript": "happy-path",
   "goal": "生成一份竞品分析",
+  "workingDir": "E:\\workspace\\demo",
   "plan": {
     "title": "交付竞品分析报告",
     "rows": [
@@ -866,6 +1132,7 @@ Content-Type: application/json
 | --- | --- | --- | --- |
 | `mockScript` | string | 是 | 必须属于 `happy-path / with-ambiguity / with-failure / with-noise`。 |
 | `goal` | string | 否 | 最多 2000 字；去除首尾空白后为空则视为未填写。 |
+| `workingDir` | string | 否 | 最多 1024 字；必须是后端机器上存在的目录，保存规范化后的绝对真实路径。 |
 | `plan` | object | 否 | 确认后的计划表；省略时由后端按 Mock 脚本的 `plan` 事件生成版本 1。 |
 
 `plan` 字段：
@@ -880,8 +1147,9 @@ Content-Type: application/json
 
 1. 校验脚本名与脚本可加载性，并从脚本 `plan` 的唯一根节点推导初始标题；
 2. 携带 `plan` 时校验其行结构，并以此作为确认稿；未携带时生成版本 1 计划草案；
-3. 生成 `mainTaskId` 与 `runId`，先向 `tn_main_task` 写入 `PENDING` 记录，
-   再向 `tn_main_task_plan` 写入计划表（版本 = `revisions.size() + 1`）；
+3. 生成 `mainTaskId` 与 `runId`，先向 `tn_main_task` 写入 `PENDING` 记录；
+   携带工作目录时向 `tn_main_task_workspace` 写入规范化路径，再向 `tn_main_task_plan`
+   写入计划表（版本 = `revisions.size() + 1`）；
 4. 创建内存 `RunState` 并异步启动 Mock 编排；启动失败时将主任务标记为 `FAILED`；
 5. 立即返回 201，不等待首个事件产生；响应中的 `plan` 是实际保存的计划表。
 
@@ -895,6 +1163,7 @@ Content-Type: application/json
     "mainTaskId": "mt_20261021_100000_a1b2c3",
     "runId": "run_20261021_100000_d4e5f6",
     "mockScript": "happy-path",
+    "workingDir": "E:\\workspace\\demo",
     "status": "PENDING",
     "createdAt": "2026-10-21T10:00:00.000Z",
     "plan": {
@@ -914,7 +1183,8 @@ Content-Type: application/json
 失败：
 
 - 未知脚本 → 400 / `40003`；
-- 缺字段、`goal` 超长、计划表行结构非法 → 400 / `40001`；
+- 缺字段、`goal` / `workingDir` 超长、计划表行结构非法 → 400 / `40001`；
+- 工作目录不存在、不是文件夹或路径非法 → 400 / `40004`；
 - 内置脚本损坏或层级非法 → 500 / `50002`。
 
 #### 7.3.2 兼容创建运行
@@ -959,10 +1229,11 @@ GET /api/main-tasks?limit=50
 | `limit` | query | 否 | 默认 50，范围 1–200；按 `createdAt` 倒序。 |
 
 `data` 为 `MainTaskSummary[]`，每项包含 `mainTaskId`、`runId`、`rootTaskId`、`title`、
-`goal`、`mockScript`、`planVersion`、`status`、`summary`、`error`、`subtaskCount`、
-`completedSubtaskCount`、`createdAt`、`updatedAt`、`completedAt`。
-`completedSubtaskCount` 只统计 `status = SUCCESS` 的子任务；`planVersion` 在没有计划表时
-为 0（历史数据），否则为已保存计划的当前版本。
+`goal`、`mockScript`、`workingDir`、`planVersion`、`status`、`summary`、`error`、
+`subtaskCount`、`completedSubtaskCount`、`createdAt`、`updatedAt`、`completedAt`。
+`workingDir` 在没有选择目录或历史数据中为 `null`；`completedSubtaskCount` 只统计
+`status = SUCCESS` 的子任务；`planVersion` 在没有计划表时为 0（历史数据），
+否则为已保存计划的当前版本。
 
 #### 7.3.4 主任务档案详情
 
@@ -1012,7 +1283,121 @@ POST /api/main-tasks/{mainTaskId}/plan/revisions
 - 未知脚本返回 `400 / 40003`；空指令或非法行结构返回 `400 / 40001`。
 
 `PlanDraftView` 字段：`mainTaskId`、`title`、`goal`、`mockScript`、`version`、
-`rows`、`revisions`、`markdown`。每行含 `title / agent / dependency / output`。
+`rows`、`revisions`、`markdown`。每行含
+`title / agent / dependency / output / taskId / description / acceptanceCriteria /
+allowedTools / testCommand`；P3 行字段可为 `null`（历史档案）。
+
+#### 7.3.6 规划会话（P3）
+
+创建主任务前先通过 SSE 完成需求澄清与计划确认。会话在确认或取消前不产生主任务，
+并持有该 Git 仓库根目录的工作区锁。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/main-tasks/plan-sessions` | 创建会话，返回 `201` |
+| `GET` | `/api/main-tasks/plan-sessions/{id}` | 查询状态、计划与 `lastSeq` |
+| `GET` | `/api/main-tasks/plan-sessions/{id}/events?afterSeq=N` | 规划 SSE |
+| `POST` | `/api/main-tasks/plan-sessions/{id}/inputs` | 提交抉择 `{taskId, selectedOptionId?, customInput?}` |
+| `POST` | `/api/main-tasks/plan-sessions/{id}/revisions` | 按提示修订 `{instruction}` |
+| `POST` | `/api/main-tasks/plan-sessions/{id}/confirm` | 确认计划并创建主任务 |
+| `POST` | `/api/main-tasks/plan-sessions/{id}/cancel` | 取消会话并释放锁 |
+
+创建请求：
+
+```json
+{
+  "goal": "为订单服务增加缓存层并补测试",
+  "workingDir": "E:/workspace/demo",
+  "mockScript": null
+}
+```
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `goal` | string | 是 | 去除首尾空白后非空，最多 4000 字。 |
+| `workingDir` | string | 是 | 必须是本机 Git 仓库根目录；后端规范化为绝对真实路径。 |
+| `mockScript` | string | 否 | 填写时走 Mock 计划（`happy-path` 等），不需要模型；省略时调用真实规划 Agent。 |
+
+创建行为：
+
+1. 校验 `goal` 与可选脚本名；
+2. `GitService.validate` 校验 Git 可执行、目录是仓库根、非 detached HEAD、工作区干净；
+3. 以 `plan:<planSessionId>` 为 owner 获取仓库工作区锁，冲突返回 `409 / 40910`；
+4. 创建会话状态并异步生成计划；Mock 模式同步发布计划；
+5. 立即返回 `201`，前端再连接 SSE。
+
+创建响应：
+
+```json
+{ "planSessionId": "ps_20261021_100000_a1b2c3", "status": "RUNNING", "lastSeq": 1 }
+```
+
+会话视图 `PlanSessionView`：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `planSessionId` | string | 会话 ID。 |
+| `status` | string | `RUNNING / WAITING_INPUT / READY / CONFIRMED / CANCELLED / FAILED`。 |
+| `goal` | string | 原始目标。 |
+| `workingDir` | string | 规范化后的仓库根路径。 |
+| `plan` | `Plan \| null` | 最近一次生成的计划。 |
+| `lastSeq` | number | 会话事件最大序号。 |
+| `error` | string \| null | `FAILED` 时的错误信息。 |
+
+状态语义：
+
+- `RUNNING`：规划 Agent 正在分析 / 调用只读工具；
+- `WAITING_INPUT`：已发出 `waiting_input`，等待 `/inputs`；心跳继续；
+- `READY`：计划已生成，可 `revisions` 反复修订或 `confirm`；
+- `CONFIRMED`：已创建主任务并释放锁，会话 SSE 以 `run_completed` 收尾；
+- `CANCELLED`：用户取消，SSE 以 `run_completed` 收尾；
+- `FAILED`：以 `error` 事件收尾，`error.code` 为 `PLAN_AGENT_FAILED` / `PLAN_AGENT_UNAVAILABLE`。
+
+规划 SSE：
+
+- 事件信封与运行 SSE 相同，`runId = planSessionId`；`task` 固定为合成根任务
+  `{taskId:"plan_root", title:"规划", ...}`。
+- 支持 `afterSeq` 补发、心跳、`waiting_input` / `input_received` 与 `run_completed` / `error`。
+- 规划阶段只出现只读工具（`fs.list` / `fs.find` / `fs.read`）与 `ask_user`。
+- 事件同时写入 `tn_plan_session_event`，供断线补发。
+
+修订：
+
+```
+POST /api/main-tasks/plan-sessions/{id}/revisions
+{ "instruction": "拆出独立的测试任务" }
+```
+
+- 仅 `READY` 可修订，否则 `409 / 40905`；空指令 `400 / 40001`。
+- 修订后状态回到 `RUNNING`，`revision` 递增；新计划事件的
+  `revision` 与 `reason` 反映本次修订。
+
+确认：
+
+```
+POST /api/main-tasks/plan-sessions/{id}/confirm
+```
+
+成功响应：
+
+```json
+{
+  "mainTaskId": "mt_20261021_100500_d4e5f6",
+  "runId": "run_20261021_100500_d4e5f6",
+  "workingDir": "E:/workspace/demo",
+  "planVersion": 2
+}
+```
+
+- 仅 `READY` 且有计划时可确认，否则 `409 / 40906`；
+- 确认前重新校验 Git 与工作目录，并记录当前分支作为 `originalBranch`；
+- 先释放规划锁，再写入 `PENDING` 主任务与计划表并启动运行；启动失败会重新获取锁，
+  会话保持 `READY`，避免产生“假确认”。
+
+取消：
+
+- 非终态会话取消后状态置 `CANCELLED`，发布 `run_completed` 并释放锁；
+- 已终态会话重复取消幂等返回成功。
 
 ### 7.4 SSE 事件流
 
@@ -1076,14 +1461,19 @@ Content-Type: application/json
 ```json
 {
   "taskId": "t_scope",
-  "selectedOptionId": "local-first"
+  "selectedOptionId": "local-first",
+  "customInput": "先只做本地缓存，云端同步下一期"
 }
 ```
 
 | 字段 | 类型 | 必填 | 约束 |
 | --- | --- | --- | --- |
 | `taskId` | string | 是 | 必须是该运行中正在等待输入的任务。 |
-| `selectedOptionId` | string | 是 | 必须属于该任务当前 `waiting_input.options[].id`。 |
+| `selectedOptionId` | string | 否 | 必须属于该任务当前 `waiting_input.options[].id`。 |
+| `customInput` | string | 否 | 自由输入，最多 4000 字；与选项至少提供一个。 |
+
+- `allowCustom=false` 时只接受 `selectedOptionId`；
+- 选择选项时可同时提交补充说明，编排器把两者一起回传给 Agent。
 
 成功响应 `202 Accepted`：
 
@@ -1091,7 +1481,12 @@ Content-Type: application/json
 {
   "code": 0,
   "message": "ok",
-  "data": { "accepted": true }
+  "data": {
+    "runId": "run_20261021_100000_a1b2c3",
+    "taskId": "t_scope",
+    "selectedOptionId": "local-first",
+    "customInput": "先只做本地缓存，云端同步下一期"
+  }
 }
 ```
 
@@ -1193,8 +1588,122 @@ GET /api/runs/{runId}
 - 推荐前端通过 Vite 代理 `/api` 到 `http://localhost:8080`，避免 CORS 与 SSE 跨域问题。
 - 若直连后端，后端允许本机开发源 `http://localhost:*`、`http://127.0.0.1:*`
   （Vite 在 5173 被占用时会自动顺延端口），不放开其他来源。
-- 允许方法：`GET, POST, OPTIONS`；允许头：`Content-Type`；不启用凭据。
+- 允许方法：`GET, POST, PUT, OPTIONS`；允许头：`Content-Type`；不启用凭据。
 - 后端默认绑定 `127.0.0.1`，减少本机暴露面。
+
+### 7.8 本地目录浏览
+
+```
+GET /api/fs/directories?path=E:\workspace&showHidden=false
+```
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `path` | 否 | 绝对路径；省略时使用后端进程的用户主目录。 |
+| `showHidden` | 否 | 默认 `false`；为 `true` 时包含隐藏目录。 |
+
+响应 `data`：
+
+```json
+{
+  "path": "E:\\workspace",
+  "parent": "E:\\",
+  "name": "workspace",
+  "roots": ["C:\\", "D:\\", "E:\\"],
+  "directories": [
+    { "name": "task-nest", "path": "E:\\workspace\\task-nest", "hidden": false }
+  ],
+  "truncated": false
+}
+```
+
+- 只读取目录项并过滤普通文件；不提供文件内容读取接口。
+- 路径不存在、不是目录或格式非法 → 400 / `40004`；读取失败 → 400 / `40005`。
+- 最多返回 500 个文件夹；超出时 `truncated=true`。
+- 该接口用于本地单用户工作台，浏览范围是后端进程可访问的本地文件系统。
+
+### 7.9 LLM 设置
+
+```
+GET /api/settings/llm
+PUT /api/settings/llm
+```
+
+`GET` 响应 `data`：
+
+```json
+{
+  "baseUrl": "https://api.openai.com/v1",
+  "modelName": "gpt-4o",
+  "apiKeyType": "LITERAL",
+  "apiKeyValue": null,
+  "apiKeyPreview": "****5678",
+  "apiKeyConfigured": true,
+  "envResolved": false,
+  "updatedAt": "2026-10-21T10:00:00.000Z"
+}
+```
+
+- LITERAL：`apiKeyValue` 恒为 `null`，`apiKeyPreview` 为 `****` + 末四位；不会返回明文。
+- ENV：`apiKeyValue` 为环境变量名，`apiKeyPreview` 为 `null`，`envResolved` 表示后端进程
+  当前能否解析到非空值。
+- 尚未保存时返回默认 Base URL（`https://api.openai.com/v1`）、默认模型
+  `gpt-4o`、`ENV` 与 `OPENAI_API_KEY`，`updatedAt` 为 `null`。
+- 模型名称为自由文本，以兼容不同 OpenAI 兼容服务商的模型 ID；不做模型列表校验。
+
+`PUT` 请求：
+
+```json
+{
+  "baseUrl": "https://api.openai.com/v1",
+  "modelName": "gpt-4o",
+  "apiKeyType": "LITERAL",
+  "apiKeyValue": "sk-..."
+}
+```
+
+| 字段 | 必填 | 约束 |
+| --- | --- | --- |
+| `baseUrl` | 是 | 完整 http/https 地址，最多 500 字；保存时去掉结尾 `/`。 |
+| `modelName` | 是 | 自由文本模型 ID，最多 128 字；去除首尾空白后不能为空。 |
+| `apiKeyType` | 是 | `LITERAL` 或 `ENV`。 |
+| `apiKeyValue` | 视类型 | LITERAL 留空表示沿用已保存值；ENV 必须是合法环境变量名。 |
+
+保存成功后响应与 `GET` 相同的视图，并立即替换运行时快照。Base URL 非法、
+模型名称为空或超长、环境变量名非法、LITERAL 首次保存却为空 → 400 / `40001`。
+
+### 7.10 Agent / 审核设置（P3）
+
+```
+GET /api/settings/agent
+PUT /api/settings/agent
+```
+
+`GET` 响应 `data`：
+
+```json
+{
+  "reviewEnabled": true,
+  "reviewMaxReworks": 2,
+  "updatedAt": "2026-10-21T10:00:00.000Z"
+}
+```
+
+`PUT` 请求：
+
+```json
+{ "reviewEnabled": true, "reviewMaxReworks": 2 }
+```
+
+| 字段 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `reviewEnabled` | boolean | 是 | 是否在每个子任务提交后启动审核 Agent。 |
+| `reviewMaxReworks` | integer | 是 | 审核退回后的最大重做次数，0–5。 |
+
+- 默认：`reviewEnabled=true`、`reviewMaxReworks=2`，保存在单例表 `tn_agent_setting`（`id=1`）。
+- 保存后立即替换运行时快照；正在运行的子任务沿用启动时的设置。
+- 参数缺失或越界 → 400 / `40001`。
+- 关闭审核时，子任务提交后直接合并，不产生 `review_started` / `review_completed`。
 
 ---
 
@@ -1211,9 +1720,12 @@ public interface TaskOrchestrator {
 
 - `start`：加载并校验脚本，提交异步执行，返回 `runId`（或由调用方生成后传入）。
 - `submitInput`：校验并唤醒等待中的运行；校验失败抛出可映射为 7.2 错误码的业务异常。
-- 本阶段唯一实现：`MockTaskOrchestrator`。
-- P3 实现：`SpringAiTaskOrchestrator`，接口不变；SSE/前端零改动。
-- 必须保留注释位：`// P3: 替换为 SpringAiTaskOrchestrator`。
+- P3 主实现：`@Primary CodingTaskOrchestrator`，按依赖顺序执行真实子 Agent；
+  `mockScript` 非空的请求委托给 `MockTaskOrchestrator`，保留 Mock 契约演练。
+- 真实执行不使用 Spring AI：项目以自定义 OpenAI 兼容 `/chat/completions` 客户端实现
+  函数工具调用（`orchestrator/llm/LlmClient`），因为现有依赖中不存在 Spring AI，
+  且 Spring AI 1.0.x 要求 Spring Boot 3.4+。该偏离已记录在 `CLAUDE.md`。
+- 接口、SSE 层、事件契约与前端保持不变；两个实现共用 `EventPublisher` 与 `RunState`。
 
 ### 8.2 运行生命周期
 
@@ -1264,7 +1776,7 @@ public interface TaskOrchestrator {
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
 | `delayMs` | integer | 否 | 0 | 相对上一条事件**产生**的等待毫秒数；范围 0–60000。 |
-| `type` | string | 是 | — | 14 种事件类型之一；禁止 `input_received` / `heartbeat`。 |
+| `type` | string | 是 | — | 17 种事件类型之一；禁止 `input_received` / `heartbeat`。 |
 | `taskId` | string | 任务事件必填 | — | 自动补全 `task` 元数据。`plan` 可省略，编排器从 `tasks[]` 中 `parentTaskId=null` 的节点推导根任务；`run_started / run_completed / error` 禁止填写。 |
 | `task` | object | 否 | — | 显式任务引用；与 `plan` 中的元数据冲突时报错。 |
 | `payload` | object | 是 | — | 按 type 校验必填字段；无载荷类型写 `{}`。 |
@@ -1347,9 +1859,13 @@ public interface TaskOrchestrator {
 
 - `TaskOrchestrator` 只暴露 `start` / `submitInput`；
 - 事件契约不得包含 `mockScript`、`delayMs`、`branches` 等 Mock 专有字段；
-- `RunState` 的 `mockScript` 字段仅供展示，P3 可为 `null` 或 `"spring-ai"`；
-- 事件产生顺序、等待输入语义、终态规则必须与真实编排器一致；
-- `// P3:` 注释必须标明替换点，不得留下无阶段标记的 TODO。
+- `RunState` 的 `mockScript` 字段仅供展示，真实执行为 `null`；
+- `CodingTaskOrchestrator` 复用同一事件产生顺序、等待输入语义与终态规则；
+- P3 新增事件（`review_started` / `review_completed` / `git_checkpoint`）只由真实编排器
+  产生，Mock 脚本禁止声明；
+- 真实编排器在创建运行前要求 `planTasks`、`workingDir`、`originalBranch` 与
+  `mainTaskBranch`；Mock 请求不要求；
+- `// P4:` 注释只用于未来阶段扩展，不得留下无阶段标记的 TODO。
 
 ---
 
@@ -1542,10 +2058,10 @@ public interface TaskOrchestrator {
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ TaskNest 任务巢   主任务 3 · 运行中 1 · MySQL 档案            [深色页头]   │
+│ TaskNest 任务巢   主任务 3 · 运行中 1 · MySQL 档案   [LLM 设置] [深色页头] │
 ├──────────────────────┬───────────────────────────────────────────────────┤
 │ 主任务目录            │ 任务工作区                                         │
-│ [搜索________]        │ 标题 / 状态 / 目标 / 脚本 / 计划版本 / 进度         │
+│ [搜索________]        │ 标题 / 状态 / 目标 / 工作目录 / 计划版本 / 进度     │
 │ [+ 新建主任务]        │ [查询日志]                                         │
 │ ┌ 01 交付竞品分析 ┐  │ [子任务] [计划表]                                   │
 │ │ 运行中 · 3/5      │ ▾ 01 收集竞品事实   成功                           │
@@ -1561,12 +2077,17 @@ public interface TaskOrchestrator {
 - 目录支持标题/目标即时搜索、刷新、新建入口；加载中显示骨架，失败显示可重试错误。
 - 视觉继续使用浅色绘图纸工作台、深色页头与账本、信号橙 `#ee5a2a`、直角细线格；
   主任务详情区域使用不透明纸面底色，避免网格透出导致灰字模糊。
+- 页头右侧提供“LLM 设置”入口，打开设置弹窗；不在页头展示任何密钥内容。
 
 #### 9.9.2 创建主任务与计划表
 
 - 点击“新建主任务”后，右侧切换为创建面板，不立即创建运行。
-- 创建步骤固定为：**选择脚本 → 描述目标 → 生成计划表 → 提示词修订（可选）→ 确认创建**。
+- 创建步骤固定为：**选择脚本 → 描述目标 → 选择工作目录（可选）→ 生成计划表 →
+  提示词修订（可选）→ 确认创建**。
 - 目标使用大的多行文本框（最多 2000 字），支持 `Ctrl/Meta + Enter` 生成计划表。
+- 工作目录为只读路径输入框，点击“选择目录”打开 `DirectoryPickerDialog`，通过
+  `GET /api/fs/directories` 逐级浏览后端本机文件夹；可清除选择。未选择时提交省略
+  `workingDir`。
 - 第一次解析必须调用 `POST /api/main-tasks/plan-drafts` 并强制生成 Markdown 计划表；
   未生成计划表不得确认创建。
 - 计划表使用 Markdown 组件渲染（`html: false`，禁止原始 HTML）；表格、标题与修订记录
@@ -1578,7 +2099,8 @@ public interface TaskOrchestrator {
 
 #### 9.9.3 任务工作区
 
-- 主任务头部展示标题、主任务状态、目标、脚本、创建/更新时间、计划版本与完成进度。
+- 主任务头部展示标题、主任务状态、目标、工作目录、脚本、创建/更新时间、计划版本与
+  完成进度；未指定工作目录时显示“未指定工作目录”，长路径省略并保留完整悬浮提示。
 - 固定两个页签：
   - **子任务**：`el-collapse` 按计划顺序展示直属子任务；点击展开思考增量、提示词
     拼接版本、工具调用表和抉择面板。
@@ -1606,6 +2128,18 @@ public interface TaskOrchestrator {
 - 通知按 `eventId` 去重；档案模式与快照重放不触发通知。
 - 点击等待/成功通知定位到对应子任务；相邻通知错开约 420ms 创建，避免堆叠错位。
 
+#### 9.9.6 目录选择与 LLM 设置弹窗
+
+- **目录选择弹窗**：显示当前路径、上级目录、根目录快捷入口；只列文件夹，默认隐藏
+  隐藏目录，可切换显示；最多 500 项，超出提示截断。确认后回填绝对路径，不读取文件。
+- **LLM 设置弹窗**：打开时读取 `GET /api/settings/llm`；字段为 Base URL 与 API Key
+  类型单选（`LITERAL` 直接写入 / `ENV` 读取环境变量）。
+  - `LITERAL`：密码输入框；已保存时提示掩码（`****` + 末四位），留空保存表示沿用；
+    明确说明明文保存在本机 MySQL，读取接口不会返回明文。
+  - `ENV`：输入环境变量名，前端校验命名格式；保存后展示后端进程能否解析该变量。
+- 保存调用 `PUT /api/settings/llm`，成功提示并关闭；失败保留表单并展示错误。
+- 弹窗说明当前阶段仅保存配置，不发起真实模型请求；修改保存后立即生效，无需重启。
+
 ---
 
 ## 10. 数据模型
@@ -1627,6 +2161,9 @@ public enum EventType {
     INPUT_RECEIVED("input_received"),
     TASK_COMPLETED("task_completed"),
     TASK_FAILED("task_failed"),
+    REVIEW_STARTED("review_started"),
+    REVIEW_COMPLETED("review_completed"),
+    GIT_CHECKPOINT("git_checkpoint"),
     RUN_COMPLETED("run_completed"),
     ERROR("error"),
     HEARTBEAT("heartbeat");
@@ -1648,14 +2185,22 @@ public record TaskRef(
 public sealed interface EventPayload permits
     RunStartedPayload, PlanPayload, TaskThoughtPayload, PromptAssembledPayload,
     ToolCallPayload, ToolResultPayload, WaitingInputPayload, InputReceivedPayload,
-    TaskCompletedPayload, TaskFailedPayload, RunCompletedPayload, ErrorPayload,
-    EmptyPayload {}
+    TaskCompletedPayload, TaskFailedPayload, ReviewStartedPayload,
+    ReviewCompletedPayload, GitCheckpointPayload, RunCompletedPayload,
+    ErrorPayload, EmptyPayload {}
 
 public record RunStartedPayload(String goal) implements EventPayload {}
-public record PlanPayload(List<PlannedTask> tasks) implements EventPayload {}
+public record PlanPayload(
+    List<PlannedTask> tasks,
+    Integer revision,
+    String reason,
+    List<String> changedTaskIds
+) implements EventPayload {}
 public record PlannedTask(
-    String taskId, String parentTaskId, String title,
-    String agentName, List<String> dependsOn
+    String taskId, String parentTaskId, String title, String agentName,
+    List<String> dependsOn, String description,
+    List<String> acceptanceCriteria, List<String> allowedTools,
+    String testCommand
 ) {}
 public record TaskThoughtPayload(String delta) implements EventPayload {}
 public record PromptAssembledPayload(
@@ -1678,14 +2223,34 @@ public enum ToolStatus {
     public String wireName() { return wireName; }
 }
 public record WaitingInputPayload(
-    String question, List<DecisionOption> options
+    String question, List<DecisionOption> options,
+    Boolean allowCustom, String customPlaceholder
 ) implements EventPayload {}
 public record DecisionOption(
     String id, String label, String description
 ) {}
-public record InputReceivedPayload(String selectedOptionId) implements EventPayload {}
+public record InputReceivedPayload(
+    String selectedOptionId, String customInput
+) implements EventPayload {}
 public record TaskCompletedPayload(String summary) implements EventPayload {}
 public record TaskFailedPayload(String error, boolean retryable) implements EventPayload {}
+public record ReviewStartedPayload(int attempt) implements EventPayload {}
+public record ReviewCompletedPayload(
+    int attempt, String verdict, String summary,
+    List<ReviewIssue> issues, String testStatus,
+    List<TestEvidence> testEvidence, String modelName, long durationMs
+) implements EventPayload {}
+public record ReviewIssue(
+    String severity, String file, Integer line,
+    String message, String suggestion
+) {}
+public record TestEvidence(
+    String command, Integer exitCode, boolean timedOut, String summary
+) {}
+public record GitCheckpointPayload(
+    String action, String branch, String targetBranch,
+    String commit, Integer attempt, boolean noChanges, String message
+) implements EventPayload {}
 public record RunCompletedPayload(String summary) implements EventPayload {}
 public record ErrorPayload(String code, String message) implements EventPayload {}
 public record EmptyPayload() implements EventPayload {}
@@ -1706,7 +2271,7 @@ public record EventEnvelope(
 - 事件类型只通过 `EventType` 枚举表达，禁止裸字符串；
 - payload 使用 record + sealed 层次；
 - 序列化由统一的 `EventSerializer` 保证线上字段与第 6 章一致；
-- 反序列化/测试必须覆盖全部 14 种类型。
+- 反序列化/测试必须覆盖全部 17 种类型。
 
 ### 10.2 MySQL 持久化模型
 
@@ -1718,10 +2283,17 @@ public record EventEnvelope(
 | --- | --- | --- |
 | `tn_main_task` | `MainTaskEntity` | 一条创建记录对应一个主任务与一次运行。 |
 | `tn_main_task_plan` | `MainTaskPlanEntity` | 与主任务一对一的计划表、行数据与修订记录。 |
+| `tn_main_task_workspace` | `MainTaskWorkspaceEntity` | 与主任务一对一的工作目录；未选择时不写行。 |
 | `tn_subtask` | `SubtaskEntity` | 直属子任务；不保存更深层级。 |
 | `tn_prompt` | `PromptEntity` | 每次 `prompt_assembled` 的完整提示词。 |
 | `tn_task_artifact` | `TaskArtifactEntity` | 思考增量、工具调用与工具结果。 |
 | `tn_event` | `RunEventEntity` | 每条事件的原始 JSON。 |
+| `tn_llm_setting` | `LlmSettingEntity` | 单例 LLM 设置：Base URL、API Key 类型与值。 |
+| `tn_llm_setting_model` | `LlmSettingModelEntity` | 单例模型名称，作为 `tn_llm_setting` 的配套表。 |
+| `tn_plan_session` | `PlanSessionEntity` | 规划会话状态、计划 JSON、最后 seq 与错误。 |
+| `tn_plan_session_event` | `PlanSessionEventEntity` | 规划会话事件原文，按 seq 唯一。 |
+| `tn_agent_setting` | `AgentSettingEntity` | 单例审核设置：开关与最大重做次数。 |
+| `tn_task_review` | `TaskReviewEntity` | 每次审核的结论、问题、测试证据与耗时。 |
 
 #### 10.2.1 `tn_main_task`
 
@@ -1815,16 +2387,112 @@ FIFO 匹配；找不到调用时新增 `TOOL_RESULT` 行。
 计划表在创建主任务时与 `tn_main_task` 同事务写入；运行中的提示词修订立即更新该行。
 修订只改变计划档案，不会创建或删除 `tn_subtask` 记录。
 
-#### 10.2.7 落库规则
+#### 10.2.7 `tn_main_task_workspace`
 
-- 创建主任务时先写 `tn_main_task`（`PENDING`）与 `tn_main_task_plan`，再启动编排；
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK AUTO | 自增主键。 |
+| `main_task_id` | VARCHAR(64) UNIQUE | 所属主任务；一个主任务最多一行。 |
+| `working_dir` | VARCHAR(1024) | 规范化后的绝对真实路径。 |
+| `created_at` / `updated_at` | DATETIME(3) | 创建时间。 |
+
+使用独立表而非给 `tn_main_task` 加列，避免既有 MySQL 库因
+`CREATE TABLE IF NOT EXISTS` 无法自动补列。未指定工作目录时不写入该表。
+
+#### 10.2.8 `tn_llm_setting`
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 固定为 1 的单例主键。 |
+| `base_url` | VARCHAR(500) | OpenAI 兼容请求地址，保存时去除结尾 `/`。 |
+| `api_key_type` | VARCHAR(16) | `LITERAL` / `ENV`。 |
+| `api_key_value` | VARCHAR(2048) | 字面密钥，或环境变量名。 |
+| `created_at` / `updated_at` | DATETIME(3) | 创建与最近保存时间。 |
+
+服务启动时读取该行到内存快照；保存成功后先写库再替换快照。读取接口对 `LITERAL`
+只返回掩码，日志不输出密钥。
+
+#### 10.2.9 `tn_llm_setting_model`
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 固定为 1 的单例主键。 |
+| `model_name` | VARCHAR(128) | OpenAI 兼容模型 ID，如 `gpt-4o`。 |
+| `created_at` / `updated_at` | DATETIME(3) | 创建与最近保存时间。 |
+
+该表是 `tn_llm_setting` 的配套单例表。已有数据库中的 `tn_llm_setting` 不会被自动补列，
+因此模型名称独立建表，保持 `CREATE TABLE IF NOT EXISTS` 可重复执行。读取时若没有该行，
+返回默认 `gpt-4o`；保存设置时与 `tn_llm_setting` 在同一事务中写入。
+
+#### 10.2.10 `tn_plan_session`
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK AUTO | 自增主键。 |
+| `plan_session_id` | VARCHAR(64) UNIQUE | 对外会话 ID，`ps_` 前缀。 |
+| `goal` | TEXT | 用户目标。 |
+| `working_dir` | VARCHAR(1024) | 规范化后的仓库根路径。 |
+| `mock_script` | VARCHAR(64) | Mock 模式脚本名；真实规划为 `NULL`。 |
+| `status` | VARCHAR(32) | `RUNNING / WAITING_INPUT / READY / CONFIRMED / CANCELLED / FAILED`。 |
+| `plan_json` | LONGTEXT | 最近一次计划事件 payload JSON。 |
+| `last_seq` | BIGINT | 会话最后事件序号。 |
+| `error` | TEXT | `FAILED` 时的错误信息。 |
+| `created_at` / `updated_at` | DATETIME(3) | 创建与最近更新时间。 |
+
+#### 10.2.11 `tn_plan_session_event`
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK AUTO | 自增主键。 |
+| `plan_session_id` | VARCHAR(64) | 所属会话。 |
+| `event_id` | VARCHAR(64) | 事件 ID。 |
+| `seq` | BIGINT | 会话内序号；与 `plan_session_id` 联合唯一。 |
+| `type` | VARCHAR(32) | 事件类型线上名。 |
+| `event_json` | LONGTEXT | 完整事件信封 JSON，供补发。 |
+| `event_time` / `created_at` | DATETIME(3) | 事件时间与落库时间。 |
+
+#### 10.2.12 `tn_agent_setting`
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK | 固定为 1 的单例主键。 |
+| `review_enabled` | BOOLEAN | 是否启用审核 Agent。 |
+| `review_max_reworks` | INT | 审核退回后的最大重做次数，0–5。 |
+| `created_at` / `updated_at` | DATETIME(3) | 创建与最近保存时间。 |
+
+#### 10.2.13 `tn_task_review`
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT PK AUTO | 自增主键。 |
+| `main_task_id` / `task_id` | VARCHAR(64) | 归属主任务与子任务。 |
+| `attempt` | INT | 子任务尝试序号；与归属联合唯一。 |
+| `verdict` | VARCHAR(16) | `PASS` / `REWORK`。 |
+| `summary` | TEXT | 审核摘要。 |
+| `issues` | LONGTEXT | 问题 JSON 数组。 |
+| `test_status` | VARCHAR(16) | `PASSED` / `FAILED` / `UNAVAILABLE`。 |
+| `test_evidence` | LONGTEXT | 测试证据 JSON 数组。 |
+| `model_name` | VARCHAR(128) | 审核所用模型。 |
+| `duration_ms` | BIGINT | 审核耗时。 |
+| `created_at` | DATETIME(3) | 落库时间。 |
+
+#### 10.2.14 落库规则
+
+- 创建主任务时先写 `tn_main_task`（`PENDING`），携带工作目录时写
+  `tn_main_task_workspace`，再写 `tn_main_task_plan`，最后启动编排；
   启动失败标记 `FAILED`；确认稿的版本由 `revisions.size() + 1` 决定。
+- LLM 设置在启动时加载 `tn_llm_setting` 与 `tn_llm_setting_model` 两个单例行；
+  `PUT` 在同一事务中保存两表，成功后立即替换运行时快照，两者必须一致。
 - 运行中的计划提示词修订直接更新 `tn_main_task_plan` 的 Markdown、行数据、修订记录、
   版本与 `updated_at`；终态后拒绝修订，返回 `40904`。
 - 每条事件先进入内存事件表并更新投影，再同步落库，最后进入 SSE 队列；落库失败只记录日志，不阻断 SSE。
 - 主任务与子任务的状态事件按 `rootTaskId` 分流，分别更新两张表。
 - `run_completed` / `error` 会补齐主任务终态，并把仍未结束的子任务修复为 `FAILED`。
 - 档案查询只读，按 `main_task_id` 取子任务、提示词、中间结果与事件；不依赖内存 `RunStore`。
+- 规划会话创建时写 `tn_plan_session`；每条规划事件同步写 `tn_plan_session_event` 并更新
+  `plan_json / last_seq / status`；确认后保留会话与事件供审计。
+- 审核事件同步写 `tn_task_review`；写失败只记录日志，不阻断审核与合并。
+- 动态重排更新 `tn_main_task_plan`，并把被取消的 `PENDING` 子任务状态写为 `CANCELLED`。
 - 测试使用 H2 `MODE=MySQL`；MySQL 8 为运行环境，两者共用 `schema.sql`。
 
 ### 10.3 运行内存状态
@@ -1859,6 +2527,7 @@ export type EventType =
   | 'prompt_assembled' | 'tool_call' | 'tool_result'
   | 'waiting_input' | 'input_received'
   | 'task_completed' | 'task_failed'
+  | 'review_started' | 'review_completed' | 'git_checkpoint'
   | 'run_completed' | 'error' | 'heartbeat';
 
 export interface TaskRef {
@@ -1868,16 +2537,49 @@ export interface TaskRef {
   agentName: string;
 }
 
-export interface PlannedTask extends TaskRef {
+export interface PlannedTask {
+  taskId: string;
+  parentTaskId: string | null;
+  title: string;
+  agentName: string;
   dependsOn: string[];
+  description: string | null;
+  acceptanceCriteria: string[] | null;
+  allowedTools: string[] | null;
+  testCommand: string | null;
 }
 
 export interface ContextSnippet { source: string; content: string; }
 export interface DecisionOption { id: string; label: string; description: string; }
+export type ReviewVerdict = 'PASS' | 'REWORK';
+export type ReviewSeverity = 'BLOCKER' | 'MAJOR' | 'MINOR';
+export type TestStatus = 'PASSED' | 'FAILED' | 'UNAVAILABLE';
+export type GitAction =
+  | 'branch_created' | 'committed' | 'merged' | 'rolled_back' | 'branch_deleted';
+
+export interface ReviewIssue {
+  severity: ReviewSeverity;
+  file: string | null;
+  line: number | null;
+  message: string;
+  suggestion: string | null;
+}
+
+export interface TestEvidence {
+  command: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  summary: string;
+}
 
 export interface PayloadMap {
   run_started: { goal: string };
-  plan: { tasks: PlannedTask[] };
+  plan: {
+    tasks: PlannedTask[];
+    revision: number | null;
+    reason: string | null;
+    changedTaskIds: string[] | null;
+  };
   task_started: Record<string, never>;
   task_thought: { delta: string };
   prompt_assembled: {
@@ -1894,10 +2596,35 @@ export interface PayloadMap {
     result: unknown;
     durationMs: number;
   };
-  waiting_input: { question: string; options: DecisionOption[] };
-  input_received: { selectedOptionId: string };
+  waiting_input: {
+    question: string;
+    options: DecisionOption[];
+    allowCustom?: boolean | null;
+    customPlaceholder?: string | null;
+  };
+  input_received: { selectedOptionId: string | null; customInput: string | null };
   task_completed: { summary: string };
   task_failed: { error: string; retryable: boolean };
+  review_started: { attempt: number };
+  review_completed: {
+    attempt: number;
+    verdict: ReviewVerdict;
+    summary: string;
+    issues: ReviewIssue[];
+    testStatus: TestStatus;
+    testEvidence: TestEvidence[];
+    modelName: string | null;
+    durationMs: number;
+  };
+  git_checkpoint: {
+    action: GitAction;
+    branch: string;
+    targetBranch: string | null;
+    commit: string | null;
+    attempt: number | null;
+    noChanges: boolean;
+    message: string | null;
+  };
   run_completed: { summary: string };
   error: { code: string; message: string };
   heartbeat: Record<string, never>;
@@ -1920,7 +2647,7 @@ export type MainTaskStatus =
 
 export type SubtaskStatus =
   | 'PENDING' | 'RUNNING' | 'WAITING_INPUT'
-  | 'RETRYING' | 'SUCCESS' | 'FAILED';
+  | 'RETRYING' | 'REVIEWING' | 'SUCCESS' | 'FAILED' | 'CANCELLED';
 
 export type RunStatus = 'RUNNING' | 'COMPLETED' | 'FAILED';
 
@@ -1930,6 +2657,8 @@ export type ConnectionState =
 export interface WaitingInputSnapshot {
   question: string;
   options: DecisionOption[];
+  allowCustom: boolean;
+  customPlaceholder: string | null;
 }
 
 export interface MainTaskSnapshot {
@@ -1966,17 +2695,49 @@ export interface PlanRowView {
   agent: string;
   dependency: string;
   output: string;
+  taskId: string | null;
+  description: string | null;
+  acceptanceCriteria: string[] | null;
+  allowedTools: string[] | null;
+  testCommand: string | null;
 }
 
 export interface PlanDraftView {
   mainTaskId: string | null;
   title: string;
   goal: string;
-  mockScript: string;
+  mockScript: string | null;
   version: number;
   rows: PlanRowView[];
   revisions: string[];
   markdown: string;
+}
+
+export type PlanSessionStatus =
+  | 'RUNNING' | 'WAITING_INPUT' | 'READY'
+  | 'CONFIRMED' | 'CANCELLED' | 'FAILED';
+
+export interface PlanSessionView {
+  planSessionId: string;
+  status: PlanSessionStatus;
+  goal: string;
+  workingDir: string;
+  plan: PayloadMap['plan'] | null;
+  lastSeq: number;
+  error: string | null;
+}
+
+export interface ConfirmPlanSessionResponse {
+  mainTaskId: string;
+  runId: string;
+  workingDir: string;
+  planVersion: number;
+}
+
+export interface AgentSettingsView {
+  reviewEnabled: boolean;
+  reviewMaxReworks: number;
+  updatedAt: string | null;
 }
 
 export interface RunSnapshot {
@@ -2021,6 +2782,11 @@ interface ToolCallView {
   durationMs?: number;
 }
 
+interface GitCheckpointView extends PayloadMap['git_checkpoint'] {
+  seq: number;
+  timestamp: string;
+}
+
 interface BaseNodeView {
   taskId: string;
   title: string;
@@ -2030,9 +2796,12 @@ interface BaseNodeView {
   toolCalls: ToolCallView[];
   waiting: PayloadMap['waiting_input'] | null;
   lastDecisionId: string | null;
+  lastCustomInput: string | null;
   summary: string | null;
   error: string | null;
   selectedOptionId: string | null;
+  review: PayloadMap['review_completed'] | null;
+  gitCheckpoints: GitCheckpointView[];
   startedAt: string | null;
   completedAt: string | null;
 }
@@ -2078,14 +2847,25 @@ interface TaskTreeState {
   plan: PlanDraftView | null;
   planError: string | null;
   planRevising: boolean;
+  planRevision: number;
+  planReason: string | null;
+  planChangedTaskIds: string[] | null;
   mainCreatedAt: string | null;
   mainUpdatedAt: string | null;
+  planSession: PlanSessionView | null;
+  planningConnection: ConnectionState;
+  planningEvents: TaskNestEvent[];
+  planningSeen: Record<string, true>;
+  planningLastSeq: number;
 }
 ```
 
-`startRun(script, goal, planDraft?)` 在创建成功时写入 `plan` 与时间戳；`revisePlan(instruction)`
-只在存在 `mainTaskId` 时调用已保存计划修订接口，成功后替换 `plan`。打开档案时
-`plan` 来自 `MainTaskDetail.plan`，档案模式下不允许修订。
+P3 创建流程：`startPlanning(goal, workingDir, mockScript?)` 建立规划会话并连接规划 SSE；
+`revisePlanning(instruction)` 调修订接口；`confirmPlanning()` 成功后以确认响应初始化运行态并
+连接运行 SSE；`cancelPlanning()` 释放会话。Mock 演练仍可走 `startRun(script, goal, draft?)`。
+打开档案时 `plan` 来自 `MainTaskDetail.plan`，档案模式下不允许修订。
+
+规划事件复用同一套信封解析、去重与 seq 处理；`plan_root` 仅用于展示，不进入 `subtaskNodes`。
 
 ### 10.6 事件处理算法（store 内部）
 
@@ -2122,6 +2902,20 @@ lastSeq = max(lastSeq, event.seq)
 ```
 
 关键：**重复 eventId 的语义跳过不能阻塞 seq 游标**（FR-EVT-05）。
+
+P3 事件补充：
+
+```text
+plan:
+  首次 → 建主任务与子任务；重排 → 保留已有节点，新增 PENDING，
+         被移除的 PENDING → CANCELLED，记录 revision/reason/changedTaskIds
+review_started:
+  子任务非终态 → REVIEWING
+review_completed:
+  保存审核结论；REWORK → RETRYING；PASS 保持 REVIEWING 等 task_completed
+git_checkpoint:
+  追加到任务级时间线，不改变任何状态
+```
 
 **缺口检查（2s）：**
 
@@ -2191,7 +2985,10 @@ openMainTask(mainTaskId):
 - 开始新运行：退出档案模式、停止旧客户端、重置 store、断开旧连接；
 - 运行终态：停止重连、关闭连接；
 - 快照 404：停止重连并展示“运行已失效”；
-- 档案模式：只读、不重连、不提交、不启动编排；退出后回到实时工作台。
+- 档案模式：只读、不重连、不提交、不启动编排；退出后回到实时工作台；
+- 规划会话结束（确认/取消/失败）：关闭规划 SSE、清理定时器与缓冲；
+- 切换主任务或新建会话：先取消未确认的规划会话，避免长期占用工作区锁；
+- 页面卸载：尽力调用取消接口（`navigator.sendBeacon` 或同步关闭连接），随后由服务端锁超时兜底。
 
 ---
 
@@ -2203,12 +3000,12 @@ openMainTask(mainTaskId):
 | NFR-02 | 可靠性 | 断线重连后事件不丢、不重复应用；乱序/重复/丢投递下最终状态一致；SSE 连接 1 小时不因空闲断开。 |
 | NFR-03 | 容量 | 单实例支持 ≥10 个并发运行、每运行 ≥10 个订阅者、每运行 ≥10,000 条事件。 |
 | NFR-04 | 兼容性 | Java 17+、Spring Boot 3.x、Maven；Node 20+、Vite、Vue 3、TypeScript strict；Chrome/Edge 最新版。 |
-| NFR-05 | 安全 | 默认绑定 `127.0.0.1`；CORS 仅白名单开发源；脚本名允许列表 + 正则校验，禁止路径穿越；不提供文件/命令执行接口；无鉴权是本期明确接受的约束。 |
+| NFR-05 | 安全 | 默认绑定 `127.0.0.1`；CORS 仅白名单开发源；脚本名允许列表 + 正则校验；文件工具限制在仓库内并拒绝敏感路径；shell 为本地白名单/黑名单双层策略；审核 Agent 无写权限；无鉴权是本期明确接受的约束。 |
 | NFR-06 | 可观测性 | 后端日志包含 `runId`、`seq`、`type`、连接生命周期；前端控制台记录重复/缺口/解析失败；UI 事件日志可调试。 |
 | NFR-07 | 可维护性 | 契约单一来源；事件类型枚举化；Controller 无业务逻辑；关键逻辑有测试；无裸字符串事件类型。 |
 | NFR-08 | 可访问性 | 键盘可操作、aria 标签、对比度 AA、减少动效支持。 |
-| NFR-09 | 禁止项 | 运行时不得发起任何模型/外部 AI 请求；不得引入 Redis、消息队列或微服务拆分。MySQL 仅用于主任务档案持久化。 |
-| NFR-10 | 状态与持久化 | 实时运行与 SSE 游标仍在内存，后端重启后不能续传，前端必须优雅处理 404；主任务、计划表、子任务、提示词、中间结果与事件原文写入 MySQL，可在主任务目录中只读查询。 |
+| NFR-09 | 禁止项 | 不得引入 Spring AI / 多模型路由 / RAG / 向量库 / 用户体系 / Redis / 消息队列 / 微服务；不得执行远程 Git 操作；不实现 token 成本预算。模型请求只发往已配置的 OpenAI 兼容 Base URL。 |
+| NFR-10 | 状态与持久化 | 实时运行、规划会话与 SSE 游标仍在内存，后端重启后不能续传，前端必须优雅处理 404；主任务、计划表、子任务、提示词、中间结果、事件原文、规划会话、审核结论与 Agent 设置写入 MySQL，可在主任务目录中只读查询。 |
 
 ---
 
@@ -2220,7 +3017,7 @@ openMainTask(mainTaskId):
 
 | 测试 | 内容 |
 | --- | --- |
-| 事件序列化 | 14 种事件逐字段序列化/反序列化；枚举输出小写下划线；空 payload 为 `{}`；`task` 为 null 的情况。 |
+| 事件序列化 | 17 种事件逐字段序列化/反序列化；枚举输出小写下划线；空 payload 为 `{}`；`task` 为 null 的情况。 |
 | seq 单调性 | 并发发布 N 条事件后，seq 集合恰为 1..N，无重复、无空洞；事件表按 seq 升序。 |
 | eventId | 默认生成规则；显式覆盖；重复 eventId 允许写入但不影响 seq。 |
 | 补发 | `afterSeq=N` 只返回 seq > N；N=lastSeq 时只接实时；非法 N 返回 400。 |
@@ -2236,6 +3033,21 @@ openMainTask(mainTaskId):
 | 计划修订与持久化 | 草案修订后版本 +1 且追加行；携带 `plan` 创建后详情/列表暴露正确版本；运行中可修订已保存计划；终态后 → 40904。 |
 | 修订语义 | 修订计划后实际子任务数量不变。 |
 | 两层校验 | happy-path 产生 1 个主任务 + 5 个直属子任务；深层级脚本加载失败。 |
+| 目录浏览 | 只返回文件夹，不返回文件；path 省略时使用用户主目录；文件路径/不存在路径 → 40004。 |
+| 工作目录 | 创建时校验并规范化绝对真实路径，响应、详情与列表回传；非法目录 → 40004；未指定时为 null。 |
+| LLM 设置 | 模型名称默认 `gpt-4o` 并与连接设置一同落库；GET 只返回密钥掩码；LITERAL 留空沿用旧值；ENV 读取进程环境并报告解析状态；非法 URL / 空模型名 / 变量名 → 40001。 |
+| 设置加载与热更新 | 模拟重启重新加载数据库设置；PUT 成功后运行时快照立即变化。 |
+| Agent 设置 | 默认开启审核、最多重做 2 次；PUT 越界（-1 / 6）→ 40001；保存后运行时快照立即生效。 |
+| 规划会话 | 创建后状态为 RUNNING/READY；非 Git 目录 → 40011；非仓库根 → 40012；脏工作区 → 40014；并发同仓库 → 40910；确认前无主任务；取消释放锁。 |
+| 规划输入 | `waiting_input` 后提交选项/自由输入 → 202 并收到 `input_received`；非等待状态 → 40901；未知选项 → 40902；空输入 → 40006。 |
+| 规划修订 | READY 才能修订；revision 递增；非 READY → 40905；空指令 → 40001。 |
+| 计划解析 | 合法两层计划通过；更深层级、重复 ID、未知依赖、环、非法工具名 → PLAN_INVALID_OUTPUT。 |
+| 动态重排 | 只能改/删 PENDING；删除的 PENDING → CANCELLED；依赖被取消任务 → 40907；已完成任务保留；revision 与 reason 正确。 |
+| 工具沙箱 | 绝对路径、`..` 逃逸、敏感文件、工作区外符号链接均被拒绝；允许的读写落在仓库内。 |
+| Shell 策略 | 危险命令（`rm -rf`、`git push`、`git reset --hard` 等）被拦截；审核命令只放行测试/lint/build/类型检查/只读 Git；`mvn -f pom.xml test` 允许。 |
+| Git 编排 | 主分支创建/子分支创建/提交/`--no-ff` 合并/删除/回滚的 `git_checkpoint` 顺序正确；冲突时保留分支并报 40912。 |
+| 审核 Agent | 平台测试失败强制 REWORK；BLOCKER/MAJOR 强制 REWORK；模型返回非法 JSON → 重试一次后 REVIEW_INVALID_OUTPUT；无写工具。 |
+| 查询豁免 | 审核只读 Git 与测试命令不改变工作区；测试产生新文件时判定 REVIEW_SIDE_EFFECT。 |
 
 SSE 集成测试可以使用 `MockMvc` 异步请求、`WebTestClient` 或直接对 `SseService` 做单元测试；至少必须覆盖事件序列化与 seq 单调性（`todo.md` 的底线）。
 
@@ -2252,7 +3064,11 @@ SSE 集成测试可以使用 `MockMvc` 异步请求、`WebTestClient` 或直接�
   - 终态修复；
   - 快照 + 增量去重；
   - 主任务/子任务双状态投影；
-  - 档案回放只读、不建立 SSE。
+  - 档案回放只读、不建立 SSE；
+  - 规划 SSE 的 de-dup / seq / 重连；
+  - 计划重排：PENDING 移除 → CANCELLED，新增任务 → PENDING；
+  - `review_started` / `review_completed` / `git_checkpoint` 投影；
+  - 自由输入与 `allowCustom=false` 的提交校验。
 
 ### 12.3 端到端验收清单
 
@@ -2264,12 +3080,20 @@ SSE 集成测试可以使用 `MockMvc` 异步请求、`WebTestClient` 或直接�
 | AT-04 | 思考增量拼接与提示词三段展示 | 运行 happy-path，选中任务 | thought 为多条 delta 拼接；prompt 的 system/user/context/final 完整；工具调用配对并显示耗时。 |
 | AT-05 | kill SSE 后自动重连、afterSeq 续传、无重复丢失 | 运行中关闭连接（DevTools 离线 3s 或关闭 curl 后再连） | 自动重连；先拉快照；从 lastSeq 续传；树无重复节点；thought 无重复；最终状态正确。 |
 | AT-06 | with-noise 下 UI 不崩、最终一致 | 运行 with-noise，立即连 SSE | 重复计数 >0；发生乱序缓冲；发生至少 1 次缺口/快照恢复；最终主任务 COMPLETED、子任务全部 SUCCESS；thought 经快照补全；无白屏。 |
-| AT-07 | docs/events.md 与前后端一致 | 对照检查 14 种类型、字段、错误码、状态机 | 三处一致；无遗漏、无多余。 |
-| AT-08 | 全程无真实模型调用 | 检查 pom/package 依赖与运行日志 | 无 Spring AI / 模型 SDK / 外部 AI 请求；只有 MyBatis-Plus 的 MySQL 访问。 |
+| AT-07 | docs/events.md 与前后端一致 | 对照检查 17 种类型、字段、错误码、状态机 | 三处一致；无遗漏、无多余。 |
+| AT-08 | 模型请求仅走配置的兼容接口 | 使用本地 stub 或 Mock 脚本；检查 pom 与日志 | 无 Spring AI；请求只发往配置的 Base URL；日志与响应不出现密钥明文。 |
 | AT-09 | 运行丢失处理（补充） | 启动运行后重启后端，刷新/等待重连 | 实时快照 404；前端提示“运行已失效”；停止重连；不白屏。 |
 | AT-10 | MySQL 持久化与档案查询 | 创建多个主任务（含 goal）；在左侧目录中打开历史条目；查询详情 | 列表含多个主任务与计划版本；详情含计划表、直属子任务、提示词、思考/工具调用与事件；打开档案为只读，不重新编排；重启后端后档案仍可打开。 |
 | AT-11 | 计划表创建与修订 | 新建主任务：描述目标 → 生成计划表 → 提示词增加风险复核 → 确认创建；打开日志弹窗；运行中再修订计划 | 未生成计划表不能确认；Markdown 表格正常渲染；确认后计划版本与修订记录落库；子任务不受修订影响；终态后修订提示只读。 |
 | AT-12 | 通知与日志弹窗 | 分别运行 with-ambiguity、with-failure、happy-path；观察通知与「查询日志」 | 等待抉择/失败通知为粘性，成功通知自动关闭；点击通知定位子任务；提交后等待通知关闭；日志弹窗默认隐藏 heartbeat，支持多选过滤与滚动。 |
+| AT-13 | 工作目录选择与持久化 | 新建主任务时打开目录选择器，逐级进入并选中一个文件夹；创建后查看头部、列表与详情；重启后端后再打开档案 | 弹窗只列文件夹；创建响应、列表与详情回传同一绝对路径；重启后仍可查询；清除后创建不带工作目录。 |
+| AT-14 | LLM / Agent 设置保存、加载与热更新 | 修改模型名称，分别保存 LITERAL 与 ENV；切换审核开关与重做次数；重启后端 | 设置持久化；模型名称默认 `gpt-4o`；LITERAL 只显示掩码且留空沿用；ENV 显示解析状态；重启自动加载；保存后无需重启生效。 |
+| AT-15 | 规划会话闭环 | 选择 Git 仓库根目录 → 输入目标 → 观察规划 SSE → 回答歧义 → 修订计划 → 确认 | 规划阶段出现思考/只读工具/`waiting_input`；回答后可继续；计划为两层并含验收标准；确认后创建主任务且 SSE 收尾；取消后不产生主任务且锁释放。 |
+| AT-16 | 真实执行与 Git 分支 | 在演示仓库执行一个两子任务计划 | 主分支 `tasknest/<mainTaskId>` 创建；每个子任务有独立分支；成功后 `--no-ff` 合并并删除子分支；最后合并回原始分支；`git_checkpoint` 时间线完整。 |
+| AT-17 | 审核退回与重做 | 开启审核，提交一个测试失败或缺少验收的实现 | 收到 `review_started` 与 `review_completed(REWORK)`；子任务进入 `RETRYING` 后重新执行；超过上限 `FAILED`；分支被丢弃。 |
+| AT-18 | 动态重排 | 让第一个子任务产出与计划冲突的结论 | 主 Agent 发出新的 `plan`（revision+1、reason）；被移除的 `PENDING` 任务显示“已取消”；已完成任务状态保持；后续按新依赖执行。 |
+| AT-19 | 安全边界 | 让 Agent 尝试读取 `.env`、写出工作区、执行 `git push` | 工具返回错误事件；不泄露密钥；工作区外无文件写入；远程分支无变化。 |
+| AT-20 | 审查命令白名单 | 计划 `testCommand` 分别为 `npm test`、`mvn -f pom.xml test`、`git push origin main` | 前两者执行；第三者被策略拦截为 `UNAVAILABLE` 且不执行。 |
 
 ### 12.4 脚本测试矩阵
 
@@ -2307,7 +3131,8 @@ task-nest/
       event/                     事件模型、枚举、序列化、EventPublisher
       store/                     运行状态、事件表、任务投影、快照
       sse/                       SseService、连接管理、心跳、补发
-      orchestrator/              TaskOrchestrator、MockTaskOrchestrator、脚本模型
+      orchestrator/              TaskOrchestrator、CodingTaskOrchestrator、MockTaskOrchestrator、
+                                 agent/、llm/、tool/、review/、GitService、PlanRevisionService
       persistence/               MyBatis-Plus 实体 / Mapper / Service、事件落库、档案查询
       api/                       控制器与 DTO
     src/main/resources/
@@ -2323,8 +3148,9 @@ task-nest/
     src/
       api/                       events.ts、client.ts、sse.ts
       stores/                    taskTree.ts
-      components/                TaskTree、TaskDetail、DecisionPanel、EventLog、
-                                 ConnectionStatus、StatusMark、MainTaskLibrary
+      components/                AppHeader、TaskDirectory、CreateTaskPanel、TaskWorkspace、
+                                 SubtaskDetail、PlanSheet、EventLogDialog、MarkdownView、
+                                 DirectoryPickerDialog、SettingsDialog、PlanningPanel
       views/                     WorkbenchView.vue
       App.vue、main.ts
     package.json、vite.config.ts、tsconfig*.json、eslint 配置
@@ -2332,18 +3158,21 @@ task-nest/
 
 ### 13.2 完成定义（DoD）
 
-- [ ] 第 12.3 节 AT-01 ~ AT-10 全部通过；
-- [ ] `mvn test` 通过，覆盖事件序列化、seq 单调性、两层投影与持久化档案；
+- [ ] 第 12.3 节 AT-01 ~ AT-20 全部通过；
+- [ ] `mvn test` 通过，覆盖事件序列化、seq 单调性、两层投影、规划会话、Git、审核与持久化档案；
 - [ ] `npm run build` 与 `npm run lint` 通过；
 - [ ] `docs/events.md` 与 Java 枚举 / TS 类型 / 本文第 6 章一致；
 - [ ] 4 个 Mock 脚本齐全且可通过校验；
-- [ ] 没有真实模型调用、Redis、消息队列或微服务拆分；MySQL 仅用于档案持久化；
+- [ ] 没有 Spring AI / Redis / 消息队列 / 微服务拆分；模型请求只走配置的 Base URL；
 - [ ] 主任务与子任务使用独立状态枚举，前端分别显示标签；
-- [ ] `tn_main_task`、`tn_subtask`、`tn_prompt`、`tn_task_artifact`、`tn_event` 均可查询到数据；
+- [ ] `tn_main_task`、`tn_subtask`、`tn_prompt`、`tn_task_artifact`、`tn_event`、
+      `tn_plan_session`、`tn_plan_session_event`、`tn_agent_setting`、`tn_task_review`
+      均可查询到数据；工作目录与 LLM 设置同样落库；
 - [ ] 没有无阶段标记的 TODO 空壳代码；
 - [ ] 后端构造器注入、控制器只做校验与转发；
 - [ ] 前端所有业务状态变更集中在 store；
-- [ ] 断线、乱序、重复、丢投递场景均验证通过。
+- [ ] 断线、乱序、重复、丢投递场景均验证通过；
+- [ ] 文件工具、shell 与审核命令的拒绝路径均有测试覆盖。
 
 ---
 
@@ -2358,7 +3187,7 @@ task-nest/
 | D-03 | `tool_call` / `tool_result` 增加可选 `callId`；缺省时按 `taskId + toolName` FIFO 配对。 | 解决同名工具并发调用的配对歧义，同时向后兼容 `todo.md` 的最小字段集。 |
 | D-04 | 断线重连采用“先拉快照 → 再以 `afterSeq` 续传”；活跃连接中的 seq 缺口则直接拉快照。 | 同时满足 `todo.md` 5.2 的“先重建再增量”和 3.4 的续传要求，覆盖事件丢失场景。 |
 | D-05 | `run_completed` → 运行 `COMPLETED`（即使有任务失败）；`error` → 运行 `FAILED`。 | 区分“运行流程结束”和“系统级失败”；任务失败是任务级信息。 |
-| D-06 | 前端增加脚本选择器与“开始运行”按钮。 | 工作台需要可操作的入口；Mock 脚本是本期唯一运行方式。 |
+| D-06 | 前端保留 Mock 脚本演练入口；真实开发走“目标 + Git 目录 + 规划会话”。 | Mock 保持离线可验收，真实执行由规划确认后启动。 |
 | D-07 | 运行终态后 SSE 冲刷完即关闭，前端不再重连。 | 避免无意义的长连接与重连循环。 |
 | D-08 | 重复 eventId 只跳过语义，不阻塞 seq 游标；未知类型同样推进游标。 | 防止幂等去重导致永久缺口和反复快照。 |
 | D-09 | 乱序缓冲窗口 2s；噪声脚本 `dispatchDelayMs` 上限 1s。 | 常规乱序可在窗口内补齐；真实丢失在 2s 后触发快照恢复。 |
@@ -2366,6 +3195,12 @@ task-nest/
 | D-11 | 服务端在第一次 `plan` 前不创建子任务节点；快照始终有 `mainTask`（`PENDING`），`subtasks` 可为空数组。 | 主任务在创建时已存在，子任务随 `plan` 出现；前端已有空态。 |
 | D-12 | 主任务与子任务使用两套状态枚举，分别持久化到 `tn_main_task` / `tn_subtask`。 | 状态语义不同（主任务无重试、子任务无 COMPLETED），分开处理避免前端与快照产生歧义。 |
 | D-13 | MySQL 使用 MyBatis-Plus 的 `BaseMapper` + `IService` / `ServiceImpl` 基础方法，不写复杂 XML。 | 满足基础实体管理需求，保持实现轻量。 |
+| D-14 | 采用自定义 OpenAI 兼容 `/chat/completions` 客户端与函数工具调用，不引入 Spring AI。 | 现有依赖无 Spring AI，Spring AI 1.0.x 要求 Boot 3.4+；自定义客户端可控且契约不扩散。 |
+| D-15 | 真实执行使用 `CodingTaskOrchestrator` 作为 `@Primary`，Mock 请求委托 `MockTaskOrchestrator`。 | 保持既有 Mock 演练与事件契约不变，同时提供真实编排。 |
+| D-16 | 规划会话与运行共用事件信封与 SSE 语义，`runId = planSessionId`。 | 前端复用解析、去重、游标与重连逻辑，减少分叉。 |
+| D-17 | 子任务失败不终止运行；只有 Git 冲突、回滚失败或系统错误终止运行。 | 与“主 Agent 汇总 + 动态重排”一致，尽量完成可执行任务。 |
+| D-18 | 审核结论以平台测试证据为准，模型只能补充问题清单。 | 防止模型伪报 PASS；测试与副作用检测可复核。 |
+| D-19 | 动态重排只动 `PENDING`；删除即 `CANCELLED`。 | 避免重写历史、重复执行已完成任务与 Git 分支冲突。 |
 
 ### 14.2 风险
 
@@ -2384,6 +3219,13 @@ task-nest/
 | 多标签页/多订阅者 | 心跳重复、事件重复 | 心跳按运行共享节拍；每个订阅者独立队列；客户端按 eventId 幂等。 |
 | 脚本路径穿越 | 读取任意文件 | 允许列表 + 脚本名正则 + 固定 classpath 前缀。 |
 | 时间戳不可信/时钟回拨 | 排序错误 | 只用 seq 排序；timestamp 仅展示。 |
+| 模型输出不可控 | 计划/代码/审核 JSON 不合法 | 严格解析 + 有限重试 + 确定性失败；审核以平台证据为准。 |
+| 模型请求超时或不可用 | 规划停滞、运行失败 | 规划会话进入 `FAILED` 并释放锁；子任务按可重试失败处理；汇总降级为确定性摘要。 |
+| Agent 误改工作区 | 用户代码丢失 | 每次尝试独立分支；失败丢弃分支；主任务失败回滚主分支并恢复原始分支。 |
+| 合并冲突 | 运行无法完成 | 保留双方分支，报告 `GIT_MERGE_CONFLICT`，由用户手工处理；绝不强推。 |
+| 审核测试耗时过长 | 长时间占用工作区 | 审核测试 10 分钟超时，运行总超时 60 分钟。 |
+| 规划会话泄漏锁 | 仓库无法再次使用 | 确认/取消/失败均释放；工作区锁带 owner 与进程内清理。 |
+| 自由输入注入提示词 | 诱导 Agent 越权 | 输入作为数据注入，不改变系统约束；工具层独立校验路径与命令。 |
 
 ### 14.3 待确认问题
 
@@ -2393,7 +3235,9 @@ task-nest/
 | Q-02 | 是否需要“取消运行”接口？ | 本期不提供；`todo.md` 未列，避免扩大范围。 |
 | Q-03 | 事件日志是否需要导出？ | 本期不提供；可复制单条 JSON。 |
 | Q-04 | 是否使用 Vite 代理还是后端 CORS 直连？ | 推荐 Vite 代理，同时后端保留白名单 CORS。 |
-| Q-05 | 是否把 `callId` 写入 `docs/events.md` 的必填字段？ | 作为可选扩展字段；实现 P3 时若工具框架提供调用 ID，再考虑升级为必填。 |
+| Q-05 | 是否把 `callId` 升级为必填？ | P3 真实 Agent 必须生成 `callId`；Mock 脚本与兼容消费端仍按可选处理。 |
+| Q-06 | 审核关闭时是否保留一次瞬时重试？ | 保留：Agent/模型瞬时失败按可重试处理一次，审核重做次数独立计算。 |
+| Q-07 | 规划会话是否需要历史列表？ | P3 不提供；只支持按 ID 打开，后续再加会话库。 |
 
 ---
 

@@ -7,5 +7,5 @@ public interface TaskOrchestrator {
 
     String start(String runId, RunRequest request);
 
-    void submitInput(String runId, String taskId, String optionId);
+    void submitInput(String runId, String taskId, String optionId, String customInput);
 }

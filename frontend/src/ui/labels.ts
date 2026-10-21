@@ -1,10 +1,15 @@
 import type {
   ConnectionState,
   EventType,
+  GitAction,
   MainTaskStatus,
+  PlanSessionStatus,
+  ReviewSeverity,
+  ReviewVerdict,
   RunStatus,
   SubtaskStatus,
   TaskStatus,
+  TestStatus,
   ToolStatus,
 } from '@/api/events'
 
@@ -21,8 +26,10 @@ export const SUBTASK_STATUS_LABEL: Record<SubtaskStatus, string> = {
   RUNNING: '执行中',
   WAITING_INPUT: '等待抉择',
   RETRYING: '重试中',
+  REVIEWING: '审核中',
   SUCCESS: '成功',
   FAILED: '失败',
+  CANCELLED: '已取消',
 }
 
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
@@ -30,9 +37,45 @@ export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
   RUNNING: '执行中',
   WAITING_INPUT: '等待输入',
   RETRYING: '重试中',
+  REVIEWING: '审核中',
   SUCCESS: '已完成',
   COMPLETED: '已完成',
   FAILED: '失败',
+  CANCELLED: '已取消',
+}
+
+export const PLAN_SESSION_STATUS_LABEL: Record<PlanSessionStatus, string> = {
+  RUNNING: '规划中',
+  WAITING_INPUT: '等待抉择',
+  READY: '待确认',
+  CONFIRMED: '已确认',
+  CANCELLED: '已取消',
+  FAILED: '规划失败',
+}
+
+export const REVIEW_VERDICT_LABEL: Record<ReviewVerdict, string> = {
+  PASS: '通过',
+  REWORK: '需要返工',
+}
+
+export const REVIEW_SEVERITY_LABEL: Record<ReviewSeverity, string> = {
+  BLOCKER: '阻断',
+  MAJOR: '重要',
+  MINOR: '次要',
+}
+
+export const TEST_STATUS_LABEL: Record<TestStatus, string> = {
+  PASSED: '测试通过',
+  FAILED: '测试失败',
+  UNAVAILABLE: '测试不可用',
+}
+
+export const GIT_ACTION_LABEL: Record<GitAction, string> = {
+  branch_created: '创建分支',
+  committed: '提交改动',
+  merged: '合并分支',
+  rolled_back: '回滚分支',
+  branch_deleted: '删除分支',
 }
 
 export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
@@ -66,6 +109,9 @@ export const EVENT_TYPE_LABEL: Record<EventType, string> = {
   input_received: '选择已提交',
   task_completed: '任务完成',
   task_failed: '任务失败',
+  review_started: '开始审核',
+  review_completed: '审核完成',
+  git_checkpoint: 'Git 检查点',
   run_completed: '运行完成',
   error: '系统错误',
   heartbeat: '心跳',
@@ -102,7 +148,7 @@ export const SCRIPT_OPTIONS: ScriptOption[] = [
 
 export function scriptName(id: string | null): string {
   if (!id) {
-    return '—'
+    return '真实 Agent'
   }
   return SCRIPT_OPTIONS.find((option) => option.id === id)?.name ?? id
 }
@@ -120,7 +166,10 @@ export function formatClock(iso: string): string {
 }
 
 export function isTerminalTaskStatus(status: TaskStatus): boolean {
-  return status === 'SUCCESS' || status === 'COMPLETED' || status === 'FAILED'
+  return status === 'SUCCESS'
+    || status === 'COMPLETED'
+    || status === 'FAILED'
+    || status === 'CANCELLED'
 }
 
 /** 主任务和子任务各自使用独立状态枚举，标签按节点类型取。 */
@@ -147,7 +196,7 @@ export function subtaskTagType(
   if (status === 'SUCCESS') return 'success'
   if (status === 'FAILED') return 'danger'
   if (status === 'WAITING_INPUT' || status === 'RETRYING') return 'warning'
-  if (status === 'RUNNING') return 'primary'
+  if (status === 'REVIEWING' || status === 'RUNNING') return 'primary'
   return 'info'
 }
 

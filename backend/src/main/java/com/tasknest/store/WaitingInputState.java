@@ -11,6 +11,8 @@ public record WaitingInputState(
         TaskRef task,
         String question,
         List<EventPayload.DecisionOption> options,
-        BlockingQueue<String> queue
+        Boolean allowCustom,
+        String customPlaceholder,
+        BlockingQueue<UserInput> queue
 ) {
 }

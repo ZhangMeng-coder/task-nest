@@ -8,15 +8,19 @@ import com.tasknest.event.EventPayload;
 import com.tasknest.event.EventType;
 import com.tasknest.event.TaskRef;
 import com.tasknest.persistence.entity.MainTaskEntity;
+import com.tasknest.persistence.entity.MainTaskWorkspaceEntity;
 import com.tasknest.persistence.entity.PromptEntity;
 import com.tasknest.persistence.entity.RunEventEntity;
 import com.tasknest.persistence.entity.SubtaskEntity;
 import com.tasknest.persistence.entity.TaskArtifactEntity;
+import com.tasknest.persistence.entity.TaskReviewEntity;
 import com.tasknest.persistence.service.MainTaskEntityService;
+import com.tasknest.persistence.service.MainTaskWorkspaceEntityService;
 import com.tasknest.persistence.service.PromptEntityService;
 import com.tasknest.persistence.service.RunEventEntityService;
 import com.tasknest.persistence.service.SubtaskEntityService;
 import com.tasknest.persistence.service.TaskArtifactEntityService;
+import com.tasknest.persistence.service.TaskReviewEntityService;
 import com.tasknest.store.MainTaskStatus;
 import com.tasknest.store.MainTaskState;
 import com.tasknest.store.RunState;
@@ -30,8 +34,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * 把实时事件落到 MySQL。实体 CRUD 使用 MyBatis-Plus 的 Service / Mapper 基础方法，
@@ -43,23 +49,29 @@ public class RunPersistenceService {
     private static final Logger log = LoggerFactory.getLogger(RunPersistenceService.class);
 
     private final MainTaskEntityService mainTaskService;
+    private final MainTaskWorkspaceEntityService workspaceService;
     private final SubtaskEntityService subtaskService;
     private final PromptEntityService promptService;
     private final TaskArtifactEntityService artifactService;
     private final RunEventEntityService eventService;
+    private final TaskReviewEntityService reviewService;
     private final ObjectMapper objectMapper;
 
     public RunPersistenceService(MainTaskEntityService mainTaskService,
+                                 MainTaskWorkspaceEntityService workspaceService,
                                  SubtaskEntityService subtaskService,
                                  PromptEntityService promptService,
                                  TaskArtifactEntityService artifactService,
                                  RunEventEntityService eventService,
+                                 TaskReviewEntityService reviewService,
                                  ObjectMapper objectMapper) {
         this.mainTaskService = mainTaskService;
+        this.workspaceService = workspaceService;
         this.subtaskService = subtaskService;
         this.promptService = promptService;
         this.artifactService = artifactService;
         this.eventService = eventService;
+        this.reviewService = reviewService;
         this.objectMapper = objectMapper;
     }
 
@@ -68,7 +80,8 @@ public class RunPersistenceService {
                                         String runId,
                                         String title,
                                         String goal,
-                                        String mockScript) {
+                                        String mockScript,
+                                        String workingDir) {
         LocalDateTime now = LocalDateTime.now();
         MainTaskEntity entity = new MainTaskEntity();
         entity.setMainTaskId(mainTaskId);
@@ -80,6 +93,14 @@ public class RunPersistenceService {
         entity.setCreatedAt(now);
         entity.setUpdatedAt(now);
         mainTaskService.save(entity);
+        if (workingDir != null && !workingDir.isBlank()) {
+            MainTaskWorkspaceEntity workspace = new MainTaskWorkspaceEntity();
+            workspace.setMainTaskId(mainTaskId);
+            workspace.setWorkingDir(workingDir);
+            workspace.setCreatedAt(now);
+            workspace.setUpdatedAt(now);
+            workspaceService.save(workspace);
+        }
         return entity;
     }
 
@@ -112,12 +133,20 @@ public class RunPersistenceService {
         switch (event.type()) {
             case RUN_STARTED -> applyRunStarted(main, event);
             case PLAN -> applyPlan(run, main, event);
-            case TASK_STARTED, WAITING_INPUT, INPUT_RECEIVED, TASK_COMPLETED, TASK_FAILED ->
-                    applyTaskStatus(run, main, event);
+            case TASK_STARTED, WAITING_INPUT, INPUT_RECEIVED, TASK_COMPLETED, TASK_FAILED,
+                    REVIEW_STARTED, REVIEW_COMPLETED -> {
+                applyTaskStatus(run, main, event);
+                if (event.type() == EventType.REVIEW_COMPLETED) {
+                    saveReview(run, event);
+                }
+            }
             case TASK_THOUGHT -> saveThought(run, event);
             case PROMPT_ASSEMBLED -> savePrompt(run, event);
             case TOOL_CALL -> saveToolCall(run, event);
             case TOOL_RESULT -> saveToolResult(run, event);
+            case GIT_CHECKPOINT -> {
+                // Git 审计信息保存在事件原文中，领域表无需更新。
+            }
             case RUN_COMPLETED -> applyRunCompleted(run, main, event);
             case ERROR -> applyError(run, main, event);
             case HEARTBEAT -> {
@@ -155,6 +184,7 @@ public class RunPersistenceService {
         mainTaskService.updateById(main);
 
         int order = 0;
+        Set<String> plannedIds = new LinkedHashSet<>();
         for (EventPayload.PlannedTask planned : plan.tasks()) {
             if (planned.parentTaskId() == null) {
                 continue;
@@ -163,6 +193,7 @@ public class RunPersistenceService {
                 log.warn("忽略非两层任务 {}（parent={}）", planned.taskId(), planned.parentTaskId());
                 continue;
             }
+            plannedIds.add(planned.taskId());
             SubtaskEntity subtask = findSubtask(main.getMainTaskId(), planned.taskId());
             if (subtask == null) {
                 subtask = new SubtaskEntity();
@@ -176,7 +207,8 @@ public class RunPersistenceService {
                 subtask.setDependsOn(writeJson(planned.dependsOn()));
                 subtask.setUpdatedAt(toLocal(event.timestamp()));
                 subtaskService.save(subtask);
-            } else {
+            } else if (SubtaskStatus.PENDING.name().equals(subtask.getStatus())) {
+                // 动态重排只允许修改尚未开始的任务。
                 subtask.setTitle(planned.title());
                 subtask.setAgentName(planned.agentName());
                 subtask.setSortOrder(order);
@@ -185,6 +217,17 @@ public class RunPersistenceService {
                 subtaskService.updateById(subtask);
             }
             order++;
+        }
+        for (SubtaskEntity existing : subtasksOf(main.getMainTaskId())) {
+            if (plannedIds.contains(existing.getTaskId())
+                    || !SubtaskStatus.PENDING.name().equals(existing.getStatus())) {
+                continue;
+            }
+            existing.setStatus(SubtaskStatus.CANCELLED.name());
+            existing.setError("计划已更新，该待办任务被取消");
+            existing.setCompletedAt(toLocal(event.timestamp()));
+            existing.setUpdatedAt(toLocal(event.timestamp()));
+            subtaskService.updateById(existing);
         }
     }
 
@@ -272,7 +315,9 @@ public class RunPersistenceService {
 
     private void applySubtaskStatus(SubtaskEntity subtask, TaskNodeState state, EventEnvelope event) {
         String current = subtask.getStatus();
-        if (SubtaskStatus.SUCCESS.name().equals(current) || SubtaskStatus.FAILED.name().equals(current)) {
+        if (SubtaskStatus.SUCCESS.name().equals(current)
+                || SubtaskStatus.FAILED.name().equals(current)
+                || SubtaskStatus.CANCELLED.name().equals(current)) {
             return;
         }
         switch (event.type()) {
@@ -316,6 +361,13 @@ public class RunPersistenceService {
                     }
                 }
             }
+            case REVIEW_STARTED -> subtask.setStatus(SubtaskStatus.REVIEWING.name());
+            case REVIEW_COMPLETED -> {
+                if (event.payload() instanceof EventPayload.ReviewCompleted review
+                        && "REWORK".equalsIgnoreCase(review.verdict())) {
+                    subtask.setStatus(SubtaskStatus.RETRYING.name());
+                }
+            }
             default -> {
             }
         }
@@ -323,6 +375,27 @@ public class RunPersistenceService {
             subtask.setSelectedOptionId(state.getSelectedOptionId());
         }
         subtask.setUpdatedAt(toLocal(event.timestamp()));
+    }
+
+    private void saveReview(RunState run, EventEnvelope event) {
+        if (!(event.payload() instanceof EventPayload.ReviewCompleted review)
+                || event.task() == null
+                || Objects.equals(event.task().taskId(), run.getMainTask().getRootTaskId())) {
+            return;
+        }
+        TaskReviewEntity entity = new TaskReviewEntity();
+        entity.setMainTaskId(run.getMainTaskId());
+        entity.setTaskId(event.task().taskId());
+        entity.setAttempt(review.attempt());
+        entity.setVerdict(review.verdict());
+        entity.setSummary(review.summary());
+        entity.setIssues(writeJson(review.issues()));
+        entity.setTestStatus(review.testStatus());
+        entity.setTestEvidence(writeJson(review.testEvidence()));
+        entity.setModelName(review.modelName());
+        entity.setDurationMs(review.durationMs());
+        entity.setCreatedAt(toLocal(event.timestamp()));
+        reviewService.save(entity);
     }
 
     private void saveThought(RunState run, EventEnvelope event) {
@@ -506,7 +579,8 @@ public class RunPersistenceService {
 
     private boolean isTerminalSubtask(String status) {
         return SubtaskStatus.SUCCESS.name().equals(status)
-                || SubtaskStatus.FAILED.name().equals(status);
+                || SubtaskStatus.FAILED.name().equals(status)
+                || SubtaskStatus.CANCELLED.name().equals(status);
     }
 
     private String writeJson(Object value) {
