@@ -1,0 +1,294 @@
+{
+  "name": "with-failure",
+  "description": "子任务首次失败（retryable=true），重试后成功，运行继续至完成。",
+  "events": [
+    {
+      "delayMs": 0,
+      "type": "run_started",
+      "payload": {
+        "goal": "汇总本周仓库动态，输出一份团队周报。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "plan",
+      "payload": {
+        "tasks": [
+          {
+            "taskId": "t_root",
+            "parentTaskId": null,
+            "title": "交付团队周报",
+            "agentName": "协调者",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_fetch",
+            "parentTaskId": "t_root",
+            "title": "拉取仓库提交",
+            "agentName": "采集员",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_fetch_auth",
+            "parentTaskId": "t_root",
+            "title": "校验访问凭据",
+            "agentName": "采集员",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_parse",
+            "parentTaskId": "t_root",
+            "title": "归类提交语义",
+            "agentName": "分析师",
+            "dependsOn": [
+              "t_fetch"
+            ]
+          },
+          {
+            "taskId": "t_report",
+            "parentTaskId": "t_root",
+            "title": "撰写周报",
+            "agentName": "撰稿人",
+            "dependsOn": [
+              "t_parse"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "delayMs": 150,
+      "type": "task_started",
+      "taskId": "t_root",
+      "payload": {}
+    },
+    {
+      "delayMs": 150,
+      "type": "task_started",
+      "taskId": "t_fetch",
+      "payload": {}
+    },
+    {
+      "delayMs": 200,
+      "type": "task_thought",
+      "taskId": "t_fetch",
+      "payload": {
+        "delta": "先确认 token 权限，再分页读取本周提交。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_started",
+      "taskId": "t_fetch_auth",
+      "payload": {}
+    },
+    {
+      "delayMs": 220,
+      "type": "task_thought",
+      "taskId": "t_fetch_auth",
+      "payload": {
+        "delta": "本地 token 已过期，先尝试刷新。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "tool_call",
+      "taskId": "t_fetch_auth",
+      "payload": {
+        "callId": "call_auth_1",
+        "toolName": "refresh_token",
+        "arguments": {
+          "scope": "repo:read"
+        }
+      }
+    },
+    {
+      "delayMs": 300,
+      "type": "tool_result",
+      "taskId": "t_fetch_auth",
+      "payload": {
+        "callId": "call_auth_1",
+        "toolName": "refresh_token",
+        "status": "error",
+        "result": {
+          "error": "refresh_token_expired",
+          "hint": "刷新链路不可用，改用环境变量只读 token"
+        },
+        "durationMs": 512
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_failed",
+      "taskId": "t_fetch_auth",
+      "payload": {
+        "error": "OAuth 刷新令牌已过期，无法读取仓库。",
+        "retryable": true
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "task_started",
+      "taskId": "t_fetch_auth",
+      "payload": {}
+    },
+    {
+      "delayMs": 220,
+      "type": "task_thought",
+      "taskId": "t_fetch_auth",
+      "payload": {
+        "delta": "重试策略：跳过刷新，直接使用环境变量中的只读 token。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "tool_call",
+      "taskId": "t_fetch_auth",
+      "payload": {
+        "callId": "call_auth_retry_1",
+        "toolName": "verify_token",
+        "arguments": {
+          "source": "env:TASK_NEST_READ_TOKEN"
+        }
+      }
+    },
+    {
+      "delayMs": 300,
+      "type": "tool_result",
+      "taskId": "t_fetch_auth",
+      "payload": {
+        "callId": "call_auth_retry_1",
+        "toolName": "verify_token",
+        "status": "success",
+        "result": {
+          "scope": "repo:read",
+          "expiresInSeconds": 3600
+        },
+        "durationMs": 188
+      }
+    },
+    {
+      "delayMs": 180,
+      "type": "task_completed",
+      "taskId": "t_fetch_auth",
+      "payload": {
+        "summary": "改用环境变量只读 token，凭据校验通过。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "tool_call",
+      "taskId": "t_fetch",
+      "payload": {
+        "callId": "call_commits_1",
+        "toolName": "list_commits",
+        "arguments": {
+          "since": "7d",
+          "pageSize": 100
+        }
+      }
+    },
+    {
+      "delayMs": 320,
+      "type": "tool_result",
+      "taskId": "t_fetch",
+      "payload": {
+        "callId": "call_commits_1",
+        "toolName": "list_commits",
+        "status": "success",
+        "result": {
+          "commits": 42,
+          "authors": 6
+        },
+        "durationMs": 279
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_completed",
+      "taskId": "t_fetch",
+      "payload": {
+        "summary": "重试后拉取到 42 条提交。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_started",
+      "taskId": "t_parse",
+      "payload": {}
+    },
+    {
+      "delayMs": 220,
+      "type": "task_thought",
+      "taskId": "t_parse",
+      "payload": {
+        "delta": "按 feat / fix / chore 归类，并关联到四个方向。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "task_completed",
+      "taskId": "t_parse",
+      "payload": {
+        "summary": "42 条提交归入 4 个方向，其中 feat 占 40%。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_started",
+      "taskId": "t_report",
+      "payload": {}
+    },
+    {
+      "delayMs": 200,
+      "type": "task_thought",
+      "taskId": "t_report",
+      "payload": {
+        "delta": "周报把「凭据刷新失败一次」写进过程记录，但不算交付风险。"
+      }
+    },
+    {
+      "delayMs": 230,
+      "type": "prompt_assembled",
+      "taskId": "t_report",
+      "payload": {
+        "systemPrompt": "你是团队周报撰稿人。过程异常如实记录，结论只基于最终可用数据。",
+        "userPrompt": "根据提交归类结果撰写周报。",
+        "contextSnippets": [
+          {
+            "source": "commit-classification.json",
+            "content": "42 条提交，feat 占 40%，4 个方向。"
+          },
+          {
+            "source": "retry.log",
+            "content": "凭据刷新失败一次，重试后通过。"
+          }
+        ],
+        "finalPrompt": "系统指令：如实记录过程异常。\n用户目标：撰写周报。\n上下文：提交数据完整，含一次已恢复的失败。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "task_completed",
+      "taskId": "t_report",
+      "payload": {
+        "summary": "周报完成，已记录一次已恢复的凭据失败。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_completed",
+      "taskId": "t_root",
+      "payload": {
+        "summary": "周报已交付，所有任务最终成功。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "run_completed",
+      "payload": {
+        "summary": "运行完成，含一次 retryable 失败并重试成功。"
+      }
+    }
+  ]
+}

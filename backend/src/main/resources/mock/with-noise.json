@@ -1,0 +1,180 @@
+{
+  "name": "with-noise",
+  "description": "投递层噪声演练：乱序、重复 eventId、延迟与丢投，前端应自愈并收敛。",
+  "events": [
+    {
+      "delayMs": 0,
+      "type": "run_started",
+      "payload": {
+        "goal": "验证事件流在乱序、重复与丢投下仍能重建一致的任务树。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "plan",
+      "payload": {
+        "tasks": [
+          {
+            "taskId": "t_root",
+            "parentTaskId": null,
+            "title": "噪声演练",
+            "agentName": "协调者",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_a",
+            "parentTaskId": "t_root",
+            "title": "分支 A",
+            "agentName": "执行者",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_a_sub",
+            "parentTaskId": "t_root",
+            "title": "A 的子步骤",
+            "agentName": "执行者",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_b",
+            "parentTaskId": "t_root",
+            "title": "分支 B",
+            "agentName": "执行者",
+            "dependsOn": [
+              "t_a"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "delayMs": 100,
+      "type": "task_started",
+      "taskId": "t_root",
+      "payload": {},
+      "dispatchDelayMs": 500
+    },
+    {
+      "delayMs": 100,
+      "type": "task_started",
+      "taskId": "t_a",
+      "payload": {}
+    },
+    {
+      "delayMs": 120,
+      "type": "task_thought",
+      "taskId": "t_a",
+      "payload": {
+        "delta": "第一条思考：这条事件会以两个不同 seq、相同 eventId 重复投递。"
+      },
+      "eventId": "evt_dup_thought",
+      "dispatchDelayMs": 300
+    },
+    {
+      "delayMs": 120,
+      "type": "task_thought",
+      "taskId": "t_a",
+      "payload": {
+        "delta": "第一条思考：这条事件会以两个不同 seq、相同 eventId 重复投递。"
+      },
+      "eventId": "evt_dup_thought"
+    },
+    {
+      "delayMs": 180,
+      "type": "task_started",
+      "taskId": "t_a_sub",
+      "payload": {}
+    },
+    {
+      "delayMs": 150,
+      "type": "task_thought",
+      "taskId": "t_a_sub",
+      "payload": {
+        "delta": "这条思考会被故意丢弃，只存在于历史快照中。"
+      },
+      "dropDispatch": true
+    },
+    {
+      "delayMs": 150,
+      "type": "task_completed",
+      "taskId": "t_a_sub",
+      "payload": {
+        "summary": "子步骤完成。"
+      }
+    },
+    {
+      "delayMs": 150,
+      "type": "tool_call",
+      "taskId": "t_a",
+      "payload": {
+        "callId": "call_noise_1",
+        "toolName": "simulate",
+        "arguments": {
+          "mode": "out-of-order"
+        }
+      },
+      "dispatchDelayMs": 500
+    },
+    {
+      "delayMs": 80,
+      "type": "tool_result",
+      "taskId": "t_a",
+      "payload": {
+        "callId": "call_noise_1",
+        "toolName": "simulate",
+        "status": "success",
+        "result": {
+          "ok": true
+        },
+        "durationMs": 42
+      }
+    },
+    {
+      "delayMs": 150,
+      "type": "task_completed",
+      "taskId": "t_a",
+      "payload": {
+        "summary": "分支 A 完成。"
+      },
+      "dispatchDelayMs": 400
+    },
+    {
+      "delayMs": 120,
+      "type": "task_started",
+      "taskId": "t_b",
+      "payload": {},
+      "dispatchDelayMs": 300
+    },
+    {
+      "delayMs": 150,
+      "type": "task_thought",
+      "taskId": "t_b",
+      "payload": {
+        "delta": "分支 B 只需汇总。"
+      }
+    },
+    {
+      "delayMs": 150,
+      "type": "task_completed",
+      "taskId": "t_b",
+      "payload": {
+        "summary": "分支 B 完成。"
+      }
+    },
+    {
+      "delayMs": 150,
+      "type": "task_completed",
+      "taskId": "t_root",
+      "payload": {
+        "summary": "所有节点已收敛。"
+      }
+    },
+    {
+      "delayMs": 150,
+      "type": "run_completed",
+      "payload": {
+        "summary": "噪声演练结束；重复被忽略，乱序被缓冲，丢投可经快照恢复。"
+      }
+    }
+  ]
+}

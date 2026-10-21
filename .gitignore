@@ -1,0 +1,26 @@
+# Build output
+backend/target/
+frontend/dist/
+frontend/node_modules/
+frontend/.vite/
+
+# Local environment
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+*.log
+
+# Review / verification artifacts
+.review/
+
+# IDE and OS
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+Thumbs.db
+
+# Maven wrapper downloads
+.mvn/wrapper/maven-wrapper.jar

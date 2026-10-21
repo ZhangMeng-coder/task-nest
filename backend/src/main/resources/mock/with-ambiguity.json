@@ -1,0 +1,254 @@
+{
+  "name": "with-ambiguity",
+  "description": "执行途中出现需要人判断的取舍，等待选择后沿对应分支继续。",
+  "events": [
+    {
+      "delayMs": 0,
+      "type": "run_started",
+      "payload": {
+        "goal": "为 CLI 工具设计离线缓存方案，并给出第一版实现计划。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "plan",
+      "payload": {
+        "tasks": [
+          {
+            "taskId": "t_root",
+            "parentTaskId": null,
+            "title": "确定缓存方案",
+            "agentName": "协调者",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_scope",
+            "parentTaskId": "t_root",
+            "title": "评估同步策略",
+            "agentName": "架构师",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_scope_signals",
+            "parentTaskId": "t_root",
+            "title": "收集冲突信号",
+            "agentName": "研究员",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_draft",
+            "parentTaskId": "t_root",
+            "title": "起草实现计划",
+            "agentName": "撰稿人",
+            "dependsOn": [
+              "t_scope"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "delayMs": 150,
+      "type": "task_started",
+      "taskId": "t_root",
+      "payload": {}
+    },
+    {
+      "delayMs": 150,
+      "type": "task_started",
+      "taskId": "t_scope",
+      "payload": {}
+    },
+    {
+      "delayMs": 220,
+      "type": "task_thought",
+      "taskId": "t_scope",
+      "payload": {
+        "delta": "离线缓存有两条路：只在本机落盘，或引入可选的云端同步。"
+      }
+    },
+    {
+      "delayMs": 180,
+      "type": "task_thought",
+      "taskId": "t_scope",
+      "payload": {
+        "delta": "两者在冲突处理和实现成本上差别很大，需要产品负责人拍板。"
+      }
+    },
+    {
+      "delayMs": 220,
+      "type": "prompt_assembled",
+      "taskId": "t_scope",
+      "payload": {
+        "systemPrompt": "你是一名务实的 CLI 架构师。优先说明取舍成本，而不是罗列技术名词。",
+        "userPrompt": "评估本地优先与云端同步两种缓存策略，指出关键差异。",
+        "contextSnippets": [
+          {
+            "source": "constraints.md",
+            "content": "首发版本不引入服务端账号体系，安装包体积上限 20MB。"
+          },
+          {
+            "source": "telemetry.md",
+            "content": "约 62% 的使用发生在无稳定网络的场景。"
+          }
+        ],
+        "finalPrompt": "系统指令：说明取舍成本。\n用户目标：评估两种缓存策略。\n上下文：首发无账号体系，多数使用在弱网环境。"
+      }
+    },
+    {
+      "delayMs": 300,
+      "type": "waiting_input",
+      "taskId": "t_scope",
+      "payload": {
+        "question": "首发版本的缓存策略选哪条？",
+        "options": [
+          {
+            "id": "local-first",
+            "label": "本地优先",
+            "description": "实现快、无账号依赖；多设备之间需要手动迁移缓存。"
+          },
+          {
+            "id": "cloud-sync",
+            "label": "云端同步",
+            "description": "体验更顺滑，但需要先补账号与冲突合并能力，首发周期至少多两周。"
+          }
+        ]
+      },
+      "branches": {
+        "local-first": [
+          {
+            "delayMs": 250,
+            "type": "task_started",
+            "taskId": "t_scope_signals",
+            "payload": {}
+          },
+          {
+            "delayMs": 250,
+            "type": "task_thought",
+            "taskId": "t_scope_signals",
+            "payload": {
+              "delta": "选定本地优先，冲突信号简化为「文件 mtime 落后于缓存」这一种。"
+            }
+          },
+          {
+            "delayMs": 250,
+            "type": "task_completed",
+            "taskId": "t_scope_signals",
+            "payload": {
+              "summary": "确认单机冲突只有一种形态，可直接覆盖。"
+            }
+          },
+          {
+            "delayMs": 250,
+            "type": "task_thought",
+            "taskId": "t_scope",
+            "payload": {
+              "delta": "方案确定：内容寻址缓存 + mtime 校验，不做后台同步。"
+            }
+          },
+          {
+            "delayMs": 200,
+            "type": "task_completed",
+            "taskId": "t_scope",
+            "payload": {
+              "summary": "采用本地优先：内容寻址缓存，mtime 冲突直接覆盖。"
+            }
+          }
+        ],
+        "cloud-sync": [
+          {
+            "delayMs": 250,
+            "type": "task_started",
+            "taskId": "t_scope_signals",
+            "payload": {}
+          },
+          {
+            "delayMs": 250,
+            "type": "task_thought",
+            "taskId": "t_scope_signals",
+            "payload": {
+              "delta": "选定云端同步，需要先识别「同文件双端修改」与「删除后复现」两类冲突。"
+            }
+          },
+          {
+            "delayMs": 250,
+            "type": "task_completed",
+            "taskId": "t_scope_signals",
+            "payload": {
+              "summary": "梳理出两类必须处理的同步冲突。"
+            }
+          },
+          {
+            "delayMs": 250,
+            "type": "task_thought",
+            "taskId": "t_scope",
+            "payload": {
+              "delta": "方案确定：内容寻址缓存 + 增量同步，冲突以版本向量合并。"
+            }
+          },
+          {
+            "delayMs": 200,
+            "type": "task_completed",
+            "taskId": "t_scope",
+            "payload": {
+              "summary": "采用云端同步：增量同步，版本向量处理冲突。"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "task_started",
+      "taskId": "t_draft",
+      "payload": {}
+    },
+    {
+      "delayMs": 220,
+      "type": "task_thought",
+      "taskId": "t_draft",
+      "payload": {
+        "delta": "按已选策略拆分里程碑：缓存层、失效策略、回归样例。"
+      }
+    },
+    {
+      "delayMs": 220,
+      "type": "prompt_assembled",
+      "taskId": "t_draft",
+      "payload": {
+        "systemPrompt": "你是交付导向的技术 writer。计划要能直接排期。",
+        "userPrompt": "根据已确认的缓存策略，输出第一版实现计划。",
+        "contextSnippets": [
+          {
+            "source": "decision.md",
+            "content": "策略已由人确认，冲突处理范围随之固定。"
+          }
+        ],
+        "finalPrompt": "系统指令：计划可直接排期。\n用户目标：第一版实现计划。\n上下文：策略已确认。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "task_completed",
+      "taskId": "t_draft",
+      "payload": {
+        "summary": "实现计划完成，三个里程碑共 8 人日。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_completed",
+      "taskId": "t_root",
+      "payload": {
+        "summary": "缓存策略已定，实现计划已给出。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "run_completed",
+      "payload": {
+        "summary": "方案与计划已完成，抉择记录已保留在事件流中。"
+      }
+    }
+  ]
+}

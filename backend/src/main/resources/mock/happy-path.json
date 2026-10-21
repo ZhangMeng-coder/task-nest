@@ -1,0 +1,351 @@
+{
+  "name": "happy-path",
+  "description": "两层任务树顺利执行：规划、检索、写作、汇总，全程无阻塞。",
+  "events": [
+    {
+      "delayMs": 0,
+      "type": "run_started",
+      "payload": {
+        "goal": "为面向开发者的 AI 编程助手产出一页竞品分析，并给出差异化建议。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "plan",
+      "payload": {
+        "tasks": [
+          {
+            "taskId": "t_root",
+            "parentTaskId": null,
+            "title": "交付竞品分析报告",
+            "agentName": "协调者",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_research",
+            "parentTaskId": "t_root",
+            "title": "收集竞品事实",
+            "agentName": "研究员",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_research_web",
+            "parentTaskId": "t_root",
+            "title": "检索公开资料",
+            "agentName": "检索员",
+            "dependsOn": []
+          },
+          {
+            "taskId": "t_research_docs",
+            "parentTaskId": "t_root",
+            "title": "核对官方文档",
+            "agentName": "检索员",
+            "dependsOn": [
+              "t_research_web"
+            ]
+          },
+          {
+            "taskId": "t_outline",
+            "parentTaskId": "t_root",
+            "title": "搭报告骨架",
+            "agentName": "分析师",
+            "dependsOn": [
+              "t_research"
+            ]
+          },
+          {
+            "taskId": "t_write",
+            "parentTaskId": "t_root",
+            "title": "撰写并校对正文",
+            "agentName": "撰稿人",
+            "dependsOn": [
+              "t_outline"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "delayMs": 150,
+      "type": "task_started",
+      "taskId": "t_root",
+      "payload": {}
+    },
+    {
+      "delayMs": 150,
+      "type": "task_started",
+      "taskId": "t_research",
+      "payload": {}
+    },
+    {
+      "delayMs": 200,
+      "type": "task_thought",
+      "taskId": "t_research",
+      "payload": {
+        "delta": "先把问题拆成功能覆盖、价格、生态三个维度，"
+      }
+    },
+    {
+      "delayMs": 180,
+      "type": "task_thought",
+      "taskId": "t_research",
+      "payload": {
+        "delta": "再为每个维度找可验证的公开来源，避免只凭印象比较。"
+      }
+    },
+    {
+      "delayMs": 220,
+      "type": "prompt_assembled",
+      "taskId": "t_research",
+      "payload": {
+        "systemPrompt": "你是一名严谨的技术产品研究员。只引用可核实的公开信息，并标注来源。",
+        "userPrompt": "围绕 AI 编程助手，收集功能、定价、生态三类事实。",
+        "contextSnippets": [
+          {
+            "source": "brief.md#scope",
+            "content": "只比较面向个人开发者的订阅产品，不涉及企业版。"
+          },
+          {
+            "source": "brief.md#output",
+            "content": "输出一页纸摘要，结论最多三条。"
+          }
+        ],
+        "finalPrompt": "系统指令：只引用可核实信息。\n用户目标：收集功能、定价、生态三类事实。\n上下文：范围限定个人开发者订阅版。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "tool_call",
+      "taskId": "t_research",
+      "payload": {
+        "callId": "call_search_1",
+        "toolName": "web_search",
+        "arguments": {
+          "query": "AI coding assistant comparison 2026",
+          "topK": 8
+        }
+      }
+    },
+    {
+      "delayMs": 350,
+      "type": "tool_result",
+      "taskId": "t_research",
+      "payload": {
+        "callId": "call_search_1",
+        "toolName": "web_search",
+        "status": "success",
+        "result": {
+          "hits": 8,
+          "topSources": [
+            "vendor-a.dev/pricing",
+            "vendor-b.dev/docs",
+            "survey.dev/2026"
+          ]
+        },
+        "durationMs": 342
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "task_started",
+      "taskId": "t_research_web",
+      "payload": {}
+    },
+    {
+      "delayMs": 200,
+      "type": "task_thought",
+      "taskId": "t_research_web",
+      "payload": {
+        "delta": "公开页面里有两家把「仓库级上下文」当作卖点，需要核实额度。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "task_completed",
+      "taskId": "t_research_web",
+      "payload": {
+        "summary": "抓到 8 条结果，筛出 3 个一手来源。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_started",
+      "taskId": "t_research_docs",
+      "payload": {}
+    },
+    {
+      "delayMs": 180,
+      "type": "task_thought",
+      "taskId": "t_research_docs",
+      "payload": {
+        "delta": "官方文档确认了免费额度与私有仓库限制。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "tool_call",
+      "taskId": "t_research_docs",
+      "payload": {
+        "callId": "call_fetch_1",
+        "toolName": "fetch_page",
+        "arguments": {
+          "url": "https://vendor-a.dev/pricing"
+        }
+      }
+    },
+    {
+      "delayMs": 300,
+      "type": "tool_result",
+      "taskId": "t_research_docs",
+      "payload": {
+        "callId": "call_fetch_1",
+        "toolName": "fetch_page",
+        "status": "success",
+        "result": {
+          "statusCode": 200,
+          "title": "Pricing"
+        },
+        "durationMs": 287
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "task_completed",
+      "taskId": "t_research_docs",
+      "payload": {
+        "summary": "核对了两家定价页，额度与公开宣传一致。"
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "task_completed",
+      "taskId": "t_research",
+      "payload": {
+        "summary": "三类事实已收齐，并保留了一手来源链接。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_started",
+      "taskId": "t_outline",
+      "payload": {}
+    },
+    {
+      "delayMs": 220,
+      "type": "task_thought",
+      "taskId": "t_outline",
+      "payload": {
+        "delta": "骨架采用「市场格局 → 能力对比 → 差异化切口」，控制在三条结论内。"
+      }
+    },
+    {
+      "delayMs": 220,
+      "type": "prompt_assembled",
+      "taskId": "t_outline",
+      "payload": {
+        "systemPrompt": "你是擅长一页纸汇报的产品分析师。",
+        "userPrompt": "基于研究结论，给出三段式报告骨架。",
+        "contextSnippets": [
+          {
+            "source": "research/summary.md",
+            "content": "能力差距集中在仓库级上下文与离线可用性。"
+          }
+        ],
+        "finalPrompt": "系统指令：一页纸、三条结论。\n用户目标：搭报告骨架。\n上下文：研究摘要已就绪。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_completed",
+      "taskId": "t_outline",
+      "payload": {
+        "summary": "骨架定稿，共三节，每节一个判断。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_started",
+      "taskId": "t_write",
+      "payload": {}
+    },
+    {
+      "delayMs": 200,
+      "type": "task_thought",
+      "taskId": "t_write",
+      "payload": {
+        "delta": "正文先写结论，再用对比表支撑，最后给出可落地的切口。"
+      }
+    },
+    {
+      "delayMs": 220,
+      "type": "prompt_assembled",
+      "taskId": "t_write",
+      "payload": {
+        "systemPrompt": "你是一名克制、具体的商业撰稿人。避免形容词堆叠。",
+        "userPrompt": "按骨架完成一页竞品分析，给出三条差异化建议。",
+        "contextSnippets": [
+          {
+            "source": "research/facts.json",
+            "content": "三家主力产品的功能、价格与限制。"
+          },
+          {
+            "source": "outline.md",
+            "content": "市场格局 / 能力对比 / 差异化切口。"
+          }
+        ],
+        "finalPrompt": "系统指令：克制、具体、可验证。\n用户目标：一页竞品分析。\n上下文：事实与骨架均已备齐。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "tool_call",
+      "taskId": "t_write",
+      "payload": {
+        "callId": "call_render_1",
+        "toolName": "render_markdown",
+        "arguments": {
+          "template": "one-pager",
+          "maxWords": 700
+        }
+      }
+    },
+    {
+      "delayMs": 320,
+      "type": "tool_result",
+      "taskId": "t_write",
+      "payload": {
+        "callId": "call_render_1",
+        "toolName": "render_markdown",
+        "status": "success",
+        "result": {
+          "pages": 1,
+          "wordCount": 612
+        },
+        "durationMs": 305
+      }
+    },
+    {
+      "delayMs": 250,
+      "type": "task_completed",
+      "taskId": "t_write",
+      "payload": {
+        "summary": "一页纸正文完成，含三条可执行建议。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "task_completed",
+      "taskId": "t_root",
+      "payload": {
+        "summary": "报告已交付：事实、骨架与正文一致。"
+      }
+    },
+    {
+      "delayMs": 200,
+      "type": "run_completed",
+      "payload": {
+        "summary": "竞品分析一页纸已完成，共 6 个任务全部成功。"
+      }
+    }
+  ]
+}

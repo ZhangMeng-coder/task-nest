@@ -1,0 +1,52 @@
+server:
+  address: 127.0.0.1
+  port: 8080
+
+spring:
+  application:
+    name: task-nest
+  datasource:
+    # 数据库凭据只来自环境变量；TASKNEST_MYSQL_* 优先，其次回退到 MYSQL_*。
+    url: jdbc:mysql://${TASKNEST_MYSQL_HOST:${MYSQL_HOST:127.0.0.1}}:${TASKNEST_MYSQL_PORT:${MYSQL_PORT:3306}}/${TASKNEST_MYSQL_DB:${MYSQL_DB:task_nest}}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+    username: ${TASKNEST_MYSQL_USERNAME:${MYSQL_USERNAME:root}}
+    password: ${TASKNEST_MYSQL_PASSWORD:${MYSQL_PASSWORD:}}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+  mvc:
+    async:
+      request-timeout: 3600000
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      table-underline: true
+
+logging:
+  level:
+    com.tasknest: INFO
+    org.springframework.web: WARN
+
+tasknest:
+  sse:
+    timeout-ms: 3600000
+    heartbeat-ms: 15000
+  mock:
+    scripts:
+      - happy-path
+      - with-ambiguity
+      - with-failure
+      - with-noise
+    delay-scale: 1.0
