@@ -3,7 +3,10 @@ package com.tasknest.store;
 import java.time.Instant;
 
 /**
- * 主任务在内存中的实时状态。与 Subtask 分开推进、分开结束。
+ * 主任务在内存中的实时状态，由 {@link TaskProjection} 根据根任务事件推进。
+ *
+ * <p>主任务与子任务分开建模、分开结束：主任务只使用 {@link MainTaskStatus}，
+ * 重试语义只属于子任务。字段在运行锁的保护下读写，快照时复制。</p>
  */
 public class MainTaskState {
 
@@ -109,6 +112,9 @@ public class MainTaskState {
         this.completedAt = completedAt;
     }
 
+    /**
+     * 主任务是否已进入终态（完成或失败）。
+     */
     public boolean isTerminal() {
         return status.isTerminal();
     }

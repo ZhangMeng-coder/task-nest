@@ -8,12 +8,11 @@ It then implements each direct subtask on temporary Git branches. Thoughts, asse
 tool calls, review verdicts, Git checkpoints, decision requests, and the event ledger are all
 exposed live.
 
-The project is at the **P3 software-development agent stage**. By default it uses a real
+The project is at the **P3 software-development agent stage**. It uses a real
 OpenAI-compatible model: the main agent plans and dynamically replans, sub-agents implement
 tasks with sandboxed file and local shell tools, and an optional independent reviewer adds a
 structured review on top of platform test execution. Every subtask attempt uses its own
-temporary branch; branches are merged on success and deleted on rework or failure. The mock
-script path remains available for exercising abnormal event streams.
+temporary branch; branches are merged on success and deleted on rework or failure.
 
 Live run and planning-session state is kept in memory. Main tasks, plans, workspaces, subtasks,
 prompts, intermediate artifacts, raw events, planning sessions, review results, and agent / LLM
@@ -40,8 +39,6 @@ the task directory.
   tasks and increment the plan revision.
 - **Full observability**: 17 SSE event types, event ledger, prompt versions, tool-call pairing,
   review panel, Git timeline, and read-only archive playback.
-- **Mock drills**: four scripts covering success, decisions, retryable failure, and
-  jitter / duplicate / out-of-order / dropped delivery.
 - **Local settings**: LLM connection and review policy are stored in MySQL, loaded at startup,
   and applied immediately after saving.
 
@@ -124,8 +121,7 @@ VITE_API_BASE=http://127.0.0.1:8080
    API key. Changes apply immediately.
 2. Use the **Agent review** tab to enable or disable independent review and set the maximum
    number of reworks.
-3. Click **New task**, choose the Git repository root, and describe the goal. A mock drill
-   script is optional.
+3. Click **New task**, choose the Git repository root, and describe the goal.
 4. Wait for the planning agent to produce a plan. Answer any questions through the options or
    the free-text input, or revise the plan with an instruction.
 5. Confirm the plan to create the main task and start execution.
@@ -237,25 +233,16 @@ Notes:
   deleted automatically.
 - Only local Git operations are allowed. No `fetch`, `pull`, `push`, `remote`, or force push.
 
-## Execution modes and mock scripts
+## Execution flow
 
-The creation panel uses the **real agent** by default: the main agent inspects the repository
-and produces the plan, while sub-agents implement work with directory, search, read, create,
-write, local shell, and `ask_user` tools. Any agent can surface an ambiguity through
-`waiting_input` with options and a free-text box.
+The creation panel uses the **real agent**: the main agent inspects the repository and produces
+the plan, while sub-agents implement work with directory, search, read, create, write, local
+shell, and `ask_user` tools. Any agent can surface an ambiguity through `waiting_input` with
+options and a free-text box.
 
-Mock scripts can be selected to exercise abnormal event streams:
-
-| Script | Scenario |
-| --- | --- |
-| `happy-path` | Two-level structure (1 main task + 5 direct subtasks), all successful |
-| `with-ambiguity` | A mid-run `waiting_input`; execution branches after a choice is submitted |
-| `with-failure` | `task_failed(retryable=true)` followed by a successful retry |
-| `with-noise` | Jittered delays, duplicate `eventId`s, out-of-order scheduling, dropped delivery |
-
-Both modes generate a plan first and start only after confirmation. The hierarchy is strictly
-two levels: the single task without a `parentTaskId` is the main task, and every other task must
-be its direct child. Deeper nesting makes mock scripts fail to load.
+A plan is always produced in a planning session and starts only after confirmation. The
+hierarchy is strictly two levels: the single task without a `parentTaskId` is the main task, and
+every other task must be its direct child. Deeper nesting is rejected.
 
 ## Security boundaries
 
@@ -284,16 +271,13 @@ envelope.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/main-tasks/plan-sessions` | Body `{"goal":"...","workingDir":"...","mockScript":"optional"}`; starts an SSE planning session |
+| `POST` | `/api/main-tasks/plan-sessions` | Body `{"goal":"...","workingDir":"..."}`; starts an SSE planning session |
 | `GET` | `/api/main-tasks/plan-sessions/{planSessionId}` | Planning-session snapshot (status, plan, event cursor) |
 | `GET` | `/api/main-tasks/plan-sessions/{planSessionId}/events?afterSeq=N` | Planning SSE stream |
 | `POST` | `/api/main-tasks/plan-sessions/{planSessionId}/inputs` | Submit a planning decision `{taskId, selectedOptionId?, customInput?}` |
 | `POST` | `/api/main-tasks/plan-sessions/{planSessionId}/revisions` | Revise the draft with an `instruction` |
 | `POST` | `/api/main-tasks/plan-sessions/{planSessionId}/confirm` | Validate Git preconditions, confirm the plan, create the main task, and start the run |
 | `POST` | `/api/main-tasks/plan-sessions/{planSessionId}/cancel` | Cancel the session, release the repository lock, create no main task |
-| `POST` | `/api/main-tasks/plan-drafts` | Compatibility endpoint: generate a deterministic plan draft |
-| `POST` | `/api/main-tasks/plan-drafts/revise` | Compatibility endpoint: revise a draft with an `instruction` |
-| `POST` | `/api/main-tasks` | Compatibility endpoint: create a main task and start it directly |
 | `GET` | `/api/main-tasks?limit=50` | Main-task list (status, plan revision, workspace, completed subtasks) |
 | `GET` | `/api/main-tasks/{mainTaskId}` | Persisted detail: main task, plan, subtasks, prompts, artifacts, raw events |
 | `POST` | `/api/main-tasks/{mainTaskId}/plan/revisions` | Revise the saved plan; returns `40904 PLAN_READ_ONLY` after the run ends |
@@ -302,7 +286,6 @@ envelope.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/api/runs` | Compatibility endpoint, body `{"mockScript":"happy-path"}`; equivalent to creating a main task |
 | `GET` | `/api/runs/{runId}` | Live snapshot: `run + mainTask + subtasks + events` |
 | `GET` | `/api/runs/{runId}/events?afterSeq=N` | Run SSE; replays history with `seq > N` first |
 | `POST` | `/api/runs/{runId}/inputs` | Submit a run decision `{taskId, selectedOptionId?, customInput?}` |
@@ -320,12 +303,20 @@ envelope.
 ### curl example
 
 ```bash
-# Compatibility path: create a task with a mock script
-RESPONSE=$(curl -s -X POST http://127.0.0.1:8080/api/main-tasks \
+# 1. Open a planning session (configure the model under Settings → LLM connection first)
+SESSION=$(curl -s -X POST http://127.0.0.1:8080/api/main-tasks/plan-sessions \
   -H 'Content-Type: application/json' \
-  -d '{"mockScript":"happy-path","goal":"Draft a competitive analysis"}')
-MAIN_TASK_ID=$(echo "$RESPONSE" | sed -E 's/.*"mainTaskId":"([^"]+)".*/\1/')
-RUN_ID=$(echo "$RESPONSE" | sed -E 's/.*"runId":"([^"]+)".*/\1/')
+  -d '{"goal":"Document the order-service API","workingDir":"E:/workspace/demo"}')
+PLAN_SESSION_ID=$(echo "$SESSION" | sed -E 's/.*"planSessionId":"([^"]+)".*/\1/')
+
+# 2. Watch planning SSE until the plan is ready
+curl -N "http://127.0.0.1:8080/api/main-tasks/plan-sessions/${PLAN_SESSION_ID}/events?afterSeq=0"
+
+# 3. Confirm the plan to create the main task and start the run
+CONFIRM=$(curl -s -X POST \
+  "http://127.0.0.1:8080/api/main-tasks/plan-sessions/${PLAN_SESSION_ID}/confirm")
+MAIN_TASK_ID=$(echo "$CONFIRM" | sed -E 's/.*"mainTaskId":"([^"]+)".*/\1/')
+RUN_ID=$(echo "$CONFIRM" | sed -E 's/.*"runId":"([^"]+)".*/\1/')
 
 curl -N "http://127.0.0.1:8080/api/runs/${RUN_ID}/events?afterSeq=0"
 curl -s "http://127.0.0.1:8080/api/main-tasks/${MAIN_TASK_ID}"
@@ -366,8 +357,8 @@ documents are currently written in Chinese.
 
 | Table | Contents |
 | --- | --- |
-| `tn_main_task` | Main-task title, goal, script, status, summary, pending decision, timestamps |
-| `tn_main_task_plan` | Plan title, goal, script, revision, Markdown, rows, revisions; one-to-one with the main task |
+| `tn_main_task` | Main-task title, goal, status, summary, pending decision, timestamps |
+| `tn_main_task_plan` | Plan title, goal, revision, Markdown, rows, revisions; one-to-one with the main task |
 | `tn_main_task_workspace` | Absolute workspace path; one-to-one with the main task |
 | `tn_subtask` | Direct subtasks: order, dependencies, status, summary, pending decision, timestamps |
 | `tn_prompt` | System / user / context / final prompts for each `prompt_assembled` event |
@@ -375,7 +366,7 @@ documents are currently written in Chinese.
 | `tn_event` | Raw JSON of every run event, used for archive playback |
 | `tn_llm_setting` | Singleton LLM settings: Base URL, API key type (LITERAL / ENV), and value |
 | `tn_llm_setting_model` | Singleton model name, paired with `tn_llm_setting` |
-| `tn_plan_session` | Planning session: workspace, script, status, plan, confirmation result |
+| `tn_plan_session` | Planning session: workspace, status, plan, confirmation result |
 | `tn_plan_session_event` | Raw planning events, used for refresh / reconnect replay |
 | `tn_agent_setting` | Singleton review settings: enabled flag and maximum reworks |
 | `tn_task_review` | Verdict, issues, test evidence, and duration for each review |
@@ -399,7 +390,7 @@ task-nest/
     src/main/java/com/tasknest/
       api/            REST controllers and DTOs
       event/          Event contract (records / sealed types / enums)
-      orchestrator/   CodingTaskOrchestrator (@Primary), MockTaskOrchestrator,
+      orchestrator/   CodingTaskOrchestrator,
                       planning/ planning session, agent/ main, sub, and reviewer agents plus
                       the tool loop, review/ platform tests and review, tool/ sandbox and
                       command policies, GitService
@@ -409,7 +400,6 @@ task-nest/
       service/        RunService, PlanDraftService, DirectoryBrowserService,
                       LlmSettingsService, AgentSettingsService
     src/main/resources/
-      mock/           Four mock event scripts
       schema.sql      Shared MySQL / H2 schema (tn_ prefix)
       db/migration/   Migration scripts for existing databases (table / column comments)
   frontend/src/
@@ -421,8 +411,8 @@ task-nest/
                        settings dialog, Markdown renderer, directory picker
     views/            Main workbench view (directory + workspace)
     styles/           Element Plus theme and Markdown typography overrides
-    ui/               Chinese labels, dual status tags, script options, directory entries,
-                       time and duration formatting
+    ui/               Chinese labels, dual status tags, directory entries, time and
+                       duration formatting
   docs/               Event contract, requirements, and P3 design
 ```
 

@@ -29,7 +29,6 @@ import com.tasknest.store.WaitingInputState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
@@ -45,9 +44,28 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 真实编码编排：主任务分支 + 串行子任务分支、独立审核、动态重排与最终合并。
- * Mock 脚本请求仍交给 {@link MockTaskOrchestrator}，保持既有演示链路可用。
+ *
+ * <p>本类是 {@link TaskOrchestrator} 的唯一实现：{@link #start} 要求确认后的计划、
+ * 工作目录与原始分支。</p>
+ *
+ * <p>{@link #execute} 的阶段顺序：</p>
+ * <ol>
+ *   <li>发布 run_started 与首个 plan 事件，按计划根任务构造事件引用；</li>
+ *   <li>从原始分支创建并检出主任务分支，记录 branch_created 检查点；</li>
+ *   <li>循环调用 {@link #nextRunnable}，按 dependsOn 只有依赖全部 SUCCESS 的子任务才可执行；</li>
+ *   <li>每个子任务交给 {@link #runSubtask}（建分支 → 执行 → 提交 → 可选审核 → 合并 → 删分支）；</li>
+ *   <li>仍有 PENDING 任务时调用 {@link #maybeReplan}，由主 Agent 决定是否发布新 revision；</li>
+ *   <li>全部完成后汇总，把主任务分支 {@code --no-ff} 合并回原始分支并删除主任务分支；</li>
+ *   <li>异常按类型分流：普通失败 {@link #rollbackAndFail} 回滚主分支，
+ *       合并冲突 {@link #keepBranchesAfterConflict} 保留双方分支并以 GIT_MERGE_CONFLICT 终止。</li>
+ * </ol>
+ *
+ * <p>每次尝试都从主任务分支切出同级临时分支
+ * {@code tasknest/subtasks/<mainTaskId>/<taskId>-a<n>}，成功合并后删除，失败或审核退回时
+ * 丢弃后重试。审核开启时尝试上限为 {@code 1 + maxReworks}，关闭时固定为 2（保留一次临时
+ * 错误重试）。整个运行持有仓库工作区锁；60 分钟截止时间只在每次子任务循环开头检查，
+ * 单次子任务 / 汇总 / 最终合并可能让实际耗时超过该值。</p>
  */
-@Primary
 @Component
 public class CodingTaskOrchestrator implements TaskOrchestrator {
 
@@ -56,7 +74,6 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
 
     private final RunStore runStore;
     private final EventPublisher eventPublisher;
-    private final MockTaskOrchestrator mockOrchestrator;
     private final GitService gitService;
     private final WorkspaceLockService lockService;
     private final AgentSettingsService agentSettings;
@@ -69,7 +86,6 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
 
     public CodingTaskOrchestrator(RunStore runStore,
                                   EventPublisher eventPublisher,
-                                  MockTaskOrchestrator mockOrchestrator,
                                   GitService gitService,
                                   WorkspaceLockService lockService,
                                   AgentSettingsService agentSettings,
@@ -82,7 +98,6 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
                                   ExecutorService orchestrationExecutor) {
         this.runStore = runStore;
         this.eventPublisher = eventPublisher;
-        this.mockOrchestrator = mockOrchestrator;
         this.gitService = gitService;
         this.lockService = lockService;
         this.agentSettings = agentSettings;
@@ -94,15 +109,17 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         this.orchestrationExecutor = orchestrationExecutor;
     }
 
+    /**
+     * 校验并异步启动运行：要求计划、工作目录与原分支，并重新校验当前分支未漂移
+     * （{@code GIT_BRANCH_DRIFT}）。成功时获取仓库工作区锁并把 {@link #execute}
+     * 提交到编排线程池；运行创建失败或线程池拒绝时释放锁，避免工作区被永久占用。
+     */
     @Override
     public String start(String runId, RunRequest request) {
-        if (request.mockMode()) {
-            return mockOrchestrator.start(runId, request);
-        }
         if (!request.hasPlan() || request.workingDir() == null
                 || request.originalBranch() == null) {
             throw new BusinessException(ErrorCode.INVALID_PARAM,
-                    "真实执行需要确认后的计划、工作目录与原分支");
+                    "执行需要确认后的计划、工作目录与原分支");
         }
         GitService.RepoInfo repo = gitService.validate(Path.of(request.workingDir()));
         if (!repo.branch().equals(request.originalBranch())) {
@@ -114,8 +131,7 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         lockService.acquire(repo.root(), owner);
         RunState run;
         try {
-            run = runStore.create(runId, request.mainTaskId(), null,
-                    request.title(), request.goal());
+            run = runStore.create(runId, request.mainTaskId(), request.title(), request.goal());
         } catch (RuntimeException exception) {
             lockService.release(repo.root(), owner);
             throw exception;
@@ -131,6 +147,11 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         return runId;
     }
 
+    /**
+     * 在运行锁内校验任务归属、运行状态与当前等待项，把用户抉择放入该等待项的队列，
+     * 从而唤醒阻塞中的编排线程。非等待状态抛 {@code NOT_WAITING_INPUT}，运行已结束抛
+     * {@code RUN_ENDED}。
+     */
     @Override
     public void submitInput(String runId, String taskId, String optionId, String customInput) {
         RunState run = runStore.require(runId);
@@ -152,6 +173,11 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         }
     }
 
+    /**
+     * 编排主循环（运行在 orchestrationExecutor 线程中）：发布开始事件、建立主任务分支、
+     * 串行消费可运行子任务、触发动态重排并最终合并收尾。所有异常在此统一转换为 error
+     * 事件并完成回滚或保留分支，finally 中释放工作区锁。
+     */
     private void execute(RunState run, RunRequest request,
                          GitService.RepoInfo repo, String owner) {
         Path root = repo.root();
@@ -254,6 +280,15 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         }
     }
 
+    /**
+     * 执行单个子任务，最多 attemptBudget 次尝试。每次尝试从主任务分支切出
+     * {@code tasknest/subtasks/<mainTaskId>/<taskId>-a<n>}，执行成功后提交，并在（可选）
+     * 审核通过后 {@code --no-ff} 合并回主任务分支、删除子分支。
+     *
+     * <p>模型/网络临时错误与审核 REWORK 都会丢弃当前分支后重试，并把上次摘要与审核意见
+     * 带入下一次尝试；预算耗尽时返回 failed，由主循环统一回滚整个运行。用户取消或运行
+     * 已终止时返回 cancelled，调用方应立即退出。</p>
+     */
     private SubtaskOutcome runSubtask(RunState run,
                                       RunAgentSession session,
                                       TaskRef rootRef,
@@ -387,6 +422,11 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         return SubtaskOutcome.failed("SUBAGENT_FAILED", "子任务没有产生结果");
     }
 
+    /**
+     * 询问主 Agent 是否需要重排：仅当仍有 PENDING 任务时尝试。决策取消、校验不通过或
+     * 调用异常都只记录日志并沿用当前计划，不让重排失败终止运行；成功时发布新的 plan
+     * 事件，并以尽力而为的方式刷新 MySQL 中的计划档案。
+     */
     private EventPayload.Plan maybeReplan(RunState run,
                                           RunAgentSession session,
                                           TaskRef rootRef,
@@ -424,6 +464,10 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         }
     }
 
+    /**
+     * 按计划顺序返回第一个 PENDING 且 dependsOn 全部 SUCCESS 的子任务；根任务与非 PENDING
+     * 任务跳过，没有可运行任务时返回 null，表示进入收尾或依赖无法满足。
+     */
     private EventPayload.PlannedTask nextRunnable(RunState run, EventPayload.Plan plan) {
         Map<String, TaskNodeState> nodes = snapshotSubtasks(run);
         for (EventPayload.PlannedTask planned : plan.tasks()) {
@@ -450,6 +494,7 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         return null;
     }
 
+    /** 返回计划中仍处于 PENDING（或尚未建立投影）的子任务，用于重排与收尾校验。 */
     private List<EventPayload.PlannedTask> pendingTasks(RunState run, EventPayload.Plan plan) {
         Map<String, TaskNodeState> nodes = snapshotSubtasks(run);
         List<EventPayload.PlannedTask> pending = new ArrayList<>();
@@ -465,6 +510,7 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         return pending;
     }
 
+    /** 复制 taskId → 当前子任务状态的快照，供 {@link PlanRevisionService} 判定哪些任务可改。 */
     private Map<String, SubtaskStatus> statusSnapshot(RunState run) {
         Map<String, SubtaskStatus> statuses = new LinkedHashMap<>();
         for (Map.Entry<String, TaskNodeState> entry : snapshotSubtasks(run).entrySet()) {
@@ -473,12 +519,18 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         return statuses;
     }
 
+    /** 在运行锁内复制子任务投影，避免与处理事件的线程并发读写状态。 */
     private Map<String, TaskNodeState> snapshotSubtasks(RunState run) {
         synchronized (run.getLock()) {
             return new LinkedHashMap<>(run.getSubtasks());
         }
     }
 
+    /**
+     * 丢弃一次失败尝试的临时分支：若仍在子任务分支上则清理工作区并切回主任务分支，
+     * 然后强制删除该分支并记录 rolled_back / branch_deleted 检查点。分支已被外部切换时
+     * 不自动 reset，交给后续的漂移校验终止运行。
+     */
     private void discardBranch(RunState run, TaskRef ref, Path root,
                                String mainBranch, String branch,
                                int attempt, String message) {
@@ -500,6 +552,7 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
                 false, "删除未合并的子任务分支");
     }
 
+    /** 尽力清理临时分支，不发布检查点；用于用户取消导致的中止路径。 */
     private void discardQuietly(Path root, String mainBranch, String branch) {
         try {
             String current = gitService.currentBranch(root);
@@ -515,6 +568,12 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         }
     }
 
+    /**
+     * 统一失败收尾：先清理 tasknest/ 临时分支上的未提交改动，切回原始分支，再强制删除
+     * 主任务分支并发布 rolled_back / branch_deleted 检查点，最后发送 error 事件。
+     * 回滚自身失败时转为 {@code GIT_ROLLBACK_FAILED} 并在消息中保留原始错误。
+     * 运行已终态时直接返回，避免重复收尾。
+     */
     private void rollbackAndFail(RunState run, Path root, String originalBranch,
                                  String mainBranch, TaskRef rootRef,
                                  String code, String message) {
@@ -547,6 +606,11 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
                 new EventPayload.Error(code, message));
     }
 
+    /**
+     * 合并冲突收尾：不删除任何分支，尽量切回原始分支后发送 GIT_MERGE_CONFLICT。
+     * 冲突工作区已由 {@code git merge --abort} 清理，保留下来的是双方分支与提交，
+     * 供人工检查或重新合并。
+     */
     private void keepBranchesAfterConflict(RunState run, Path root,
                                            String originalBranch, String mainBranch,
                                            BusinessException exception) {
@@ -560,6 +624,7 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
                         exception.getMessage() + "（已保留分支 " + mainBranch + "）"));
     }
 
+    /** 发布 git_checkpoint 事件；它只用于时间线展示，不改变任何任务状态。 */
     private void publishCheckpoint(RunState run, TaskRef task, String action,
                                    String branch, String targetBranch, String commit,
                                    Integer attempt, boolean noChanges, String message) {
@@ -568,6 +633,7 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
                         action, branch, targetBranch, commit, attempt, noChanges, message));
     }
 
+    /** 从计划中找出 parentTaskId == null 的根任务作为事件引用，缺失时视为非法计划。 */
     private TaskRef rootRef(List<EventPayload.PlannedTask> tasks) {
         return tasks.stream()
                 .filter(task -> task.parentTaskId() == null)
@@ -623,6 +689,7 @@ public class CodingTaskOrchestrator implements TaskOrchestrator {
         return "run:" + runId;
     }
 
+    /** 子任务一次执行循环的结果；cancelled=true 表示运行已被终止，应立即退出主循环。 */
     private record SubtaskOutcome(boolean success, boolean cancelled,
                                   String summary, String errorCode, String errorMessage) {
         static SubtaskOutcome success(String summary) {

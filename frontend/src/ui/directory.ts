@@ -5,7 +5,6 @@ export interface DirectoryTask {
   id: string
   title: string
   goal: string | null
-  mockScript: string
   workingDir: string | null
   status: MainTaskStatus
   subtaskCount: number

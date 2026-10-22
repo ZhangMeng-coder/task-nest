@@ -35,14 +35,13 @@ TaskNest（任务巢）是本地 Agent 任务工作台。本文件给后续协�
 
 ### 任务层级
 
-- 只允许两层：一个主任务 + 其直属子任务。`mock/*.json` 中出现更深层级时脚本加载失败。
+- 只允许两层：一个主任务 + 其直属子任务。规划输出出现更深层级时计划被拒绝。
 - 主任务与子任务分开建表、分开处理状态：主任务用 `MainTaskStatus`
   （`PENDING/RUNNING/WAITING_INPUT/COMPLETED/FAILED`），子任务用 `SubtaskStatus`
   （`PENDING/RUNNING/WAITING_INPUT/RETRYING/REVIEWING/SUCCESS/FAILED/CANCELLED`）。
 - 快照结构为 `run + mainTask + subtasks + events`，不再返回递归 `taskTree`。
-- 真实执行由 `@Primary CodingTaskOrchestrator` 承担；请求带 `mockScript` 时委托
-  `MockTaskOrchestrator`，Mock 脚本与旧契约继续可用。`TaskOrchestrator` 接口、SSE 层与
-  事件信封保持不变。
+- 执行由唯一的 `CodingTaskOrchestrator` 承担，只通过规划会话确认后启动。
+  `TaskOrchestrator` 接口、SSE 层与事件信封保持不变。
 
 ## 命令
 
@@ -70,19 +69,18 @@ npm run lint      # eslint --max-warnings=0
 ### 后端
 
 ```text
-api/MainTaskController        REST：创建主任务、计划草案 / 修订、主任务列表、持久化详情
+api/MainTaskController        REST：主任务列表、持久化详情、已保存计划修订
 api/PlanSessionController     REST：规划会话创建 / 查询 / 输入 / 修订 / 确认 / 取消 / SSE
 api/DirectoryController       REST：本机目录浏览（只列文件夹，供工作目录选择器）
 api/SettingsController        REST：读取 / 更新 LLM 连接与 Agent 审核设置
 api/RunController             REST：运行快照、提交抉择、SSE
 service/RunService            用例编排、mainTaskId / runId 生成、工作目录校验、启动前保存计划
 service/PlanningSessionService 规划会话生命周期、Git 前置校验、工作区锁、确认创建
-service/PlanDraftService      计划生成 / 提示词修订 / 持久化、运行期计划更新（确定性 Mock 实现）
+service/PlanDraftService      确认稿持久化、已保存计划修订、运行期计划更新
 service/AgentSettingsService  审核开关与最大重做次数，启动加载、保存后热更新
 service/DirectoryBrowserService 本地目录解析、根目录 / 父目录 / 子目录列表
 service/LlmSettingsService    启动加载 MySQL 设置、保存后热更新运行时快照、密钥掩码 / 环境变量解析
-orchestrator/CodingTaskOrchestrator  @Primary 真实执行：依赖调度、Git 分支、审核、动态重排
-orchestrator/MockTaskOrchestrator     Mock 脚本执行（真实请求带 mockScript 时委托）
+orchestrator/CodingTaskOrchestrator  执行：依赖调度、Git 分支、审核、动态重排
 orchestrator/agent/            PlanParser、PlanningAgent、SubAgent、MainAgent、AgentLoop、PromptFactory
 orchestrator/llm/              OpenAI 兼容 /chat/completions 客户端、函数工具调用、模型设置
 orchestrator/tool/             ToolExecutor、WorkspaceSandbox、CommandPolicy、ReviewCommandPolicy
@@ -101,9 +99,8 @@ persistence/RunPersistenceService   事件 -> MySQL 映射（事务）、创建�
 persistence/MainTaskQueryService    主任务列表与详情（MySQL 查询，含计划版本 / 工作目录）
 ```
 
-- `CodingTaskOrchestrator` 是 `@Primary` 实现：带 `mockScript` 的请求委托
-  `MockTaskOrchestrator`（读取 `resources/mock/{script}.json`，按 `delayMs` 执行，
-  遇 `waiting_input` 阻塞等待 `submitInput`）；真实请求要求计划、工作目录与原始分支。
+- `CodingTaskOrchestrator` 是唯一 `TaskOrchestrator` 实现：要求已确认的计划、工作目录
+  与原始分支；遇 `waiting_input` 阻塞等待 `submitInput`。
 - 真实执行流程：创建 `tasknest/<mainTaskId>` 分支 → 按 `dependsOn` 串行跑子任务 →
   每次尝试建 `tasknest/subtasks/<mainTaskId>/<taskId>-a<n>`（与主任务分支同级，
   Git ref 不能同时是文件与目录）→ 提交 → 可选审核 → `--no-ff` 合并 →
@@ -120,14 +117,13 @@ persistence/MainTaskQueryService    主任务列表与详情（MySQL 查询，�
 - 事件先进入内存事件列表并更新投影，再同步落库，最后进入 SSE 连接队列，保证快照和
   `afterSeq` 补发一致；
   `EventPublisher` 同步写 MySQL，持久化失败只记日志，不阻断 SSE。
-- 真实任务创建先走规划会话：`POST /api/main-tasks/plan-sessions`（`goal + workingDir +
-  可选 mockScript`）→ 规划 SSE → `waiting_input` / 修订 → `confirm` 才创建主任务。
+- 任务创建只能走规划会话：`POST /api/main-tasks/plan-sessions`（`goal + workingDir`）
+  → 规划 SSE → `waiting_input` / 修订 → `confirm` 才创建主任务。
   规划期间持有仓库工作区锁；确认前重新校验 Git 并把当前分支记为原始分支。
   规划事件写入 `tn_plan_session_event`，会话状态写入 `tn_plan_session`。
 - 计划表单独存 `tn_main_task_plan`（与主任务一对一），不放进 `tn_main_task`，
-  避免既有库的 `CREATE TABLE IF NOT EXISTS` 无法补列。创建流程先调
-  `POST /api/main-tasks/plan-drafts` 生成草案，可用 `plan-drafts/revise` 按提示修订，
-  确认后把 `title + rows + revisions` 作为 `plan` 随创建请求提交；后端重新生成 Markdown。
+  避免既有库的 `CREATE TABLE IF NOT EXISTS` 无法补列。规划会话确认时把
+  `title + rows + revisions` 作为确认稿保存；后端据此生成 Markdown。
   运行中的档案修订只更新计划表（`POST /api/main-tasks/{id}/plan/revisions`），
   不会增删已运行的子任务；`COMPLETED/FAILED` 后返回 `40904 PLAN_READ_ONLY`。
 - `schema.sql` 使用 `CREATE TABLE IF NOT EXISTS`，MySQL 与 H2（MODE=MySQL）共用；
@@ -160,7 +156,7 @@ components/         AppHeader / TaskDirectory / CreateTaskPanel（规划会话�
                     EventLogDialog / MarkdownView / DirectoryPickerDialog / SettingsDialog
 views/WorkbenchView.vue  目录 + 工作区编排、规划 / 创建流程、Element Plus 通知
 styles/             element-plus.css（主题变量、弹窗 / 通知 / Markdown 排版）
-ui/labels.ts        中文文案、双状态标签、脚本选项、时间与耗时格式化
+ui/labels.ts        中文文案、双状态标签、时间与耗时格式化
 ui/directory.ts     目录条目类型（MySQL 档案 + 当前实时运行合并）
 ```
 
@@ -169,10 +165,8 @@ ui/directory.ts     目录条目类型（MySQL 档案 + 当前实时运行合并
 - 主任务与子任务节点分开建模，界面固定两层；不再递归渲染任务树。
 - 正式工作台：左侧主任务目录（MySQL 列表 + 当前运行），右侧任务工作区；
   子任务用 `el-collapse` 展开，计划表单独页签，事件账本用 `el-dialog` 弹窗。
-- 真实创建流程：目标 + Git 工作目录（可选 `mockScript`）→ `POST plan-sessions` →
-  连接规划 SSE → 展示规划思考 / 只读工具 / 抉择 / 计划表 → 提示修订 →
-  `confirm` 创建主任务并切换到运行 SSE。Mock 演练同样走规划会话，只额外携带 `mockScript`；
-  `plan-drafts` + `startRun` 仅作为兼容入口保留。
+- 创建流程：目标 + Git 工作目录 → `POST plan-sessions` → 连接规划 SSE →
+  展示规划思考 / 只读工具 / 抉择 / 计划表 → 提示修订 → `confirm` 创建主任务并切换到运行 SSE。
   工作目录通过 `DirectoryPickerDialog` 调用 `/api/fs/directories` 选择，不用浏览器目录 API。
 - 规划与运行共用事件解析、去重、seq 缓冲与重连；`plan_root` 不做成子任务节点。
 - 子任务展示 `REVIEWING` / `CANCELLED`；审核面板展示 verdict、问题、测试证据；

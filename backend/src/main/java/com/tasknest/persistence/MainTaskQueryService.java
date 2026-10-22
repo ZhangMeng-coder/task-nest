@@ -44,7 +44,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 主任务档案查询。所有查询都基于 MyBatis-Plus 的基础 list/get/count 方法。
+ * 主任务档案只读查询服务：左侧目录使用列表，档案页使用详情。
+ * <p>所有读取基于 MyBatis-Plus 的基础 list/get/count 方法，不建立 SSE、不提交抉择，
+ * 因此档案模式天然只读。持久化的 JSON 字段按行容错解析，坏数据只记日志并回退，
+ * 不阻断整份档案的展示。</p>
  */
 @Service
 public class MainTaskQueryService {
@@ -88,6 +91,12 @@ public class MainTaskQueryService {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 按创建时间倒序查询主任务目录。
+     *
+     * @param limit 期望条数；会夹紧到 1–200，避免目录请求无上限扫描
+     * @return 目录摘要，附带计划版本、工作目录与子任务总数/完成数
+     */
     public List<MainTaskSummary> list(int limit) {
         int bounded = Math.min(Math.max(limit, 1), 200);
         List<MainTaskEntity> entities = mainTaskService.list(
@@ -126,6 +135,16 @@ public class MainTaskQueryService {
         return result;
     }
 
+    /**
+     * 组装主任务只读档案：主任务、计划、直属子任务、提示词、中间结果与事件账本。
+     * <p>{@code event_json} 逐行解析为 JSON 节点，空值或坏行跳过；{@code lastSeq} 取
+     * 持久化事件的最大序号，前端据此判断档案是否完整。该入口只读 MySQL，
+     * 不会恢复运行或重新建立 SSE。</p>
+     *
+     * @param mainTaskId 主任务业务 ID
+     * @return 档案详情
+     * @throws BusinessException 主任务不存在时返回 {@link ErrorCode#MAIN_TASK_NOT_FOUND}
+     */
     public MainTaskDetail detail(String mainTaskId) {
         MainTaskEntity main = findMain(mainTaskId);
         List<SubtaskEntity> subtasks = subtaskService.list(
@@ -177,6 +196,9 @@ public class MainTaskQueryService {
                 lastSeq);
     }
 
+    /**
+     * 按主任务业务 ID 读取档案；不存在时转换为统一的业务异常。
+     */
     private MainTaskEntity findMain(String mainTaskId) {
         MainTaskEntity main = mainTaskService.getOne(
                 Wrappers.<MainTaskEntity>lambdaQuery()
@@ -198,7 +220,6 @@ public class MainTaskQueryService {
                 entity.getRootTaskId(),
                 entity.getTitle(),
                 entity.getGoal(),
-                entity.getMockScript(),
                 workingDir,
                 planVersion,
                 MainTaskStatus.valueOf(entity.getStatus()),
@@ -216,7 +237,6 @@ public class MainTaskQueryService {
                 entity.getMainTaskId(),
                 entity.getPlanTitle(),
                 entity.getPlanGoal(),
-                entity.getPlanScript(),
                 entity.getPlanVersion() == null ? 1 : entity.getPlanVersion(),
                 entity.getPlanMarkdown(),
                 readJson(entity.getPlanRows(), PLAN_ROWS, Collections.emptyList()),
@@ -266,6 +286,9 @@ public class MainTaskQueryService {
                 toInstant(entity.getCreatedAt()));
     }
 
+    /**
+     * 容错解析 JSON 列：空值或解析失败返回调用方给定的默认值，并记录告警。
+     */
     private <T> T readJson(String json, TypeReference<T> type, T fallback) {
         if (json == null || json.isBlank()) {
             return fallback;
@@ -278,6 +301,9 @@ public class MainTaskQueryService {
         }
     }
 
+    /**
+     * 解析事件原文或中间结果 JSON；空值或坏 JSON 返回 {@code null}，由调用方跳过该行。
+     */
     private JsonNode readTree(String json) {
         if (json == null || json.isBlank()) {
             return null;

@@ -12,6 +12,11 @@ import java.util.Set;
 /**
  * 工具名称、OpenAI function 定义与别名映射。
  * 模型使用下划线名称（fs_read），事件契约与内部实现使用点号名称（fs.read）。
+ *
+ * <p>同时维护按 {@link AgentMode} 划分的工具集合与 function schema。
+ * {@link com.tasknest.orchestrator.agent.AgentLoop} 用 {@link #canonical} /
+ * {@link #isConversational} 归一化名称并拦截 ask_user，{@link ToolExecutor} 用常量分派。
+ * {@link #definitions} 只向模型暴露当前模式真正允许的工具，写工具不会出现在规划 / 审核模式。
  */
 public final class ToolRegistry {
 
@@ -34,10 +39,15 @@ public final class ToolRegistry {
     private ToolRegistry() {
     }
 
+    /** 点号内部名转下划线 function 名，用于 OpenAI function calling。 */
     public static String toFunctionName(String toolName) {
         return toolName.replace('.', '_');
     }
 
+    /**
+     * 把模型返回的 function 名归一化为内部点号名。已知名称按固定映射，
+     * 未知名称做保守回退（已含点号则原样返回，否则下划线转点号）。
+     */
     public static String toToolName(String functionName) {
         if (functionName == null) {
             return "";
@@ -60,10 +70,16 @@ public final class ToolRegistry {
         return toToolName(toolName);
     }
 
+    /** 是否为对话型工具（目前只有 ask_user）；由 AgentLoop 拦截，不交给 ToolExecutor。 */
     public static boolean isConversational(String toolName) {
         return CONVERSATIONAL_TOOLS.contains(canonical(toolName));
     }
 
+    /**
+     * 生成当前模式与 allowed 交集内的 OpenAI function 定义。
+     *
+     * @param allowed 允许工具名（点号或下划线均可）；为空表示使用模式全集
+     */
     public static List<Map<String, Object>> definitions(AgentMode mode, List<String> allowed) {
         List<Map<String, Object>> definitions = new ArrayList<>();
         AgentMode effectiveMode = mode == null ? AgentMode.EXECUTION : mode;
@@ -79,6 +95,7 @@ public final class ToolRegistry {
                 definitions.add(definition(name, schemaFor(name)));
             }
         }
+        // 写工具只在执行模式暴露；规划与审核连 schema 都看不到，避免模型尝试越权调用。
         if (effectiveMode == AgentMode.EXECUTION && allowedSet.contains(FS_CREATE)) {
             definitions.add(definition(FS_CREATE, schemaFor(FS_CREATE)));
         }

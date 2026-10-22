@@ -3,12 +3,10 @@ import {
   type AcceptedResponse,
   type AgentSettingsView,
   type ConfirmPlanSessionResponse,
-  type CreateMainTaskResponse,
   type CreatePlanSessionResponse,
   type MainTaskDetail,
   type MainTaskSummary,
   type PlanDraftView,
-  type PlanRowView,
   type PlanSessionView,
   type RunSnapshot,
 } from './events'
@@ -67,39 +65,6 @@ function jsonInit(method: 'POST' | 'PUT', payload: unknown): RequestInit {
   }
 }
 
-/** 创建主任务时提交的确认稿；Markdown 由后端按 rows 重新生成。 */
-export interface PlanDraftInput {
-  title: string
-  rows: PlanRowView[]
-  revisions: string[]
-}
-
-/** 创建前生成计划表草案，不启动运行。 */
-export function generatePlanDraft(mockScript: string, goal: string): Promise<PlanDraftView> {
-  return request<PlanDraftView>(
-    '/api/main-tasks/plan-drafts',
-    jsonInit('POST', { mockScript, goal }),
-  )
-}
-
-/** 用自然语言提示修订尚未确认的计划表草案。 */
-export function revisePlanDraft(
-  draft: PlanDraftView,
-  instruction: string,
-): Promise<PlanDraftView> {
-  return request<PlanDraftView>(
-    '/api/main-tasks/plan-drafts/revise',
-    jsonInit('POST', {
-      mockScript: draft.mockScript,
-      title: draft.title,
-      goal: draft.goal,
-      rows: draft.rows,
-      revisions: draft.revisions,
-      instruction,
-    }),
-  )
-}
-
 /** 修订已保存到主任务档案中的计划表。 */
 export function reviseMainTaskPlan(
   mainTaskId: string,
@@ -111,47 +76,17 @@ export function reviseMainTaskPlan(
   )
 }
 
-/** 创建一个会写入 MySQL 的主任务，并立即启动 Mock 编排。 */
-export function createMainTask(
-  mockScript: string,
-  goal?: string,
-  plan?: PlanDraftInput,
-  workingDir?: string | null,
-): Promise<CreateMainTaskResponse> {
-  const payload: {
-    mockScript: string
-    goal?: string
-    workingDir?: string
-    plan?: PlanDraftInput
-  } = { mockScript }
-  if (goal && goal.trim().length > 0) {
-    payload.goal = goal.trim()
-  }
-  if (workingDir && workingDir.trim().length > 0) {
-    payload.workingDir = workingDir.trim()
-  }
-  if (plan) {
-    payload.plan = plan
-  }
-  return request<CreateMainTaskResponse>('/api/main-tasks', jsonInit('POST', payload))
-}
-
-/** 创建规划会话；不传 mockScript 时使用真实规划 Agent。 */
+/** 创建规划会话，由真实规划 Agent 生成计划。 */
 export function createPlanSession(
   goal: string,
   workingDir: string,
-  mockScript?: string | null,
 ): Promise<CreatePlanSessionResponse> {
-  const payload: { goal: string; workingDir: string; mockScript?: string } = {
-    goal: goal.trim(),
-    workingDir: workingDir.trim(),
-  }
-  if (mockScript && mockScript.trim().length > 0) {
-    payload.mockScript = mockScript.trim()
-  }
   return request<CreatePlanSessionResponse>(
     '/api/main-tasks/plan-sessions',
-    jsonInit('POST', payload),
+    jsonInit('POST', {
+      goal: goal.trim(),
+      workingDir: workingDir.trim(),
+    }),
   )
 }
 

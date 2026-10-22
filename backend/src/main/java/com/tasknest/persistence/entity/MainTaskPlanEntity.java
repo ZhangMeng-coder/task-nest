@@ -7,7 +7,9 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
 
 /**
- * 主任务计划表档案。一个主任务一行，修订时更新版本并保留修改记录。
+ * {@code tn_main_task_plan} 主任务计划档案，与主任务一对一，不放进 {@code tn_main_task}。
+ * <p>{@code PlanDraftService} 创建草案与运行期修订时写入；{@code plan_rows} 与
+ * {@code plan_revisions} 以 LONGTEXT JSON 保存，{@code plan_version} 随重排递增。</p>
  */
 @TableName("tn_main_task_plan")
 public class MainTaskPlanEntity {
@@ -17,7 +19,6 @@ public class MainTaskPlanEntity {
     private String mainTaskId;
     private String planTitle;
     private String planGoal;
-    private String planScript;
     private Integer planVersion;
     private String planMarkdown;
     private String planRows;
@@ -55,14 +56,6 @@ public class MainTaskPlanEntity {
 
     public void setPlanGoal(String planGoal) {
         this.planGoal = planGoal;
-    }
-
-    public String getPlanScript() {
-        return planScript;
-    }
-
-    public void setPlanScript(String planScript) {
-        this.planScript = planScript;
     }
 
     public Integer getPlanVersion() {

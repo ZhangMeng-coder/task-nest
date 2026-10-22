@@ -4,8 +4,6 @@ import com.tasknest.api.dto.AcceptedResponse;
 import com.tasknest.api.dto.ConfirmPlanSessionResponse;
 import com.tasknest.api.dto.CreatePlanSessionRequest;
 import com.tasknest.api.dto.CreatePlanSessionResponse;
-import com.tasknest.api.dto.PlanDraftView;
-import com.tasknest.api.dto.PlanRowView;
 import com.tasknest.api.dto.PlanSessionView;
 import com.tasknest.common.BusinessException;
 import com.tasknest.common.ErrorCode;
@@ -13,12 +11,10 @@ import com.tasknest.event.EventPayload;
 import com.tasknest.event.EventType;
 import com.tasknest.event.TaskRef;
 import com.tasknest.orchestrator.GitService;
-import com.tasknest.orchestrator.MockScriptLoader;
 import com.tasknest.orchestrator.agent.AgentException;
 import com.tasknest.orchestrator.agent.PlanDraft;
 import com.tasknest.orchestrator.agent.PlanningAgent;
 import com.tasknest.orchestrator.llm.LlmException;
-import com.tasknest.orchestrator.tool.ToolRegistry;
 import com.tasknest.sse.PlanSessionSseService;
 import com.tasknest.store.UserInput;
 import com.tasknest.store.WaitingInputState;
@@ -31,8 +27,6 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -40,8 +34,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 
 /**
- * 规划会话生命周期：创建、提问、修订、确认、取消。
- * 规划阶段持有工作区锁；确认前不创建主任务。
+ * 规划会话的生命周期编排：创建、提问 / 提交抉择、修订、确认、取消。
+ *
+ * <p>该服务位于 REST 层与规划 Agent / 运行创建之间，协调 {@link PlanSessionStore}
+ * （内存状态与事件持久化）、{@link PlanSessionSseService}（SSE 投递）、
+ * {@link PlanningAgent}（计划生成）、{@link GitService}（仓库前置校验）与
+ * {@link WorkspaceLockService}（仓库级互斥锁）。</p>
+ *
+ * <p>关键约束：规划期间以 {@code plan:<planSessionId>} 作为持有者占用仓库锁，
+ * 确认前不创建主任务；只有 {@code READY} 状态且已有计划的会话才能确认。
+ * 确认成功后先释放锁并创建主任务，再把会话置为 {@code CONFIRMED}；
+ * 创建失败则重新获取锁，保持会话可重试。取消 / 失败会释放锁并关闭规划 SSE。</p>
  */
 @Service
 public class PlanningSessionService {
@@ -56,8 +59,6 @@ public class PlanningSessionService {
     private final GitService gitService;
     private final WorkspaceLockService lockService;
     private final RunService runService;
-    private final MockScriptLoader scriptLoader;
-    private final PlanDraftService planDraftService;
     private final ExecutorService orchestrationExecutor;
     private final Map<String, Path> workingRoots = new ConcurrentHashMap<>();
 
@@ -67,8 +68,6 @@ public class PlanningSessionService {
                                   GitService gitService,
                                   WorkspaceLockService lockService,
                                   RunService runService,
-                                  MockScriptLoader scriptLoader,
-                                  PlanDraftService planDraftService,
                                   @Qualifier("orchestrationExecutor")
                                   ExecutorService orchestrationExecutor) {
         this.store = store;
@@ -77,21 +76,22 @@ public class PlanningSessionService {
         this.gitService = gitService;
         this.lockService = lockService;
         this.runService = runService;
-        this.scriptLoader = scriptLoader;
-        this.planDraftService = planDraftService;
         this.orchestrationExecutor = orchestrationExecutor;
     }
 
+    /**
+     * 创建规划会话并占用仓库锁，随后异步提交规划 Agent。
+     *
+     * <p>初始化阶段发生任何异常都会释放已获取的锁并清理工作目录映射，
+     * 避免仓库被永久占用。返回时会话通常仍处于 {@code RUNNING}，
+     * 调用方随后通过 SSE 观察规划进展。</p>
+     *
+     * @throws BusinessException 目标为空、目录不是 Git 仓库或仓库已被占用时抛出
+     */
     public CreatePlanSessionResponse create(CreatePlanSessionRequest request) {
         String goal = request.goal() == null ? "" : request.goal().trim();
         if (goal.isEmpty()) {
             throw new BusinessException(ErrorCode.INVALID_PARAM, "目标不能为空");
-        }
-        String mockScript = request.mockScript() == null || request.mockScript().isBlank()
-                ? null : request.mockScript().trim();
-        if (mockScript != null && !scriptLoader.isAllowed(mockScript)) {
-            throw new BusinessException(ErrorCode.INVALID_SCRIPT,
-                    "mockScript 必须是 " + String.join(" / ", scriptLoader.allowedScripts()));
         }
         Path workingDir = Path.of(request.workingDir().trim());
         GitService.RepoInfo repo = gitService.validate(workingDir);
@@ -100,13 +100,9 @@ public class PlanningSessionService {
         lockService.acquire(repo.root(), owner);
         try {
             PlanSessionState state = store.create(
-                    planSessionId, goal, repo.root().toString(), mockScript);
+                    planSessionId, goal, repo.root().toString());
             workingRoots.put(planSessionId, repo.root());
-            if (mockScript != null) {
-                publishMockPlan(state);
-            } else {
-                submitPlanning(state, null);
-            }
+            submitPlanning(state, null);
             return new CreatePlanSessionResponse(
                     planSessionId, state.getStatus().name(), state.getLastSeq());
         } catch (RuntimeException exception) {
@@ -116,6 +112,9 @@ public class PlanningSessionService {
         }
     }
 
+    /**
+     * 读取会话的只读视图。在会话锁内复制字段，避免与规划线程的写入交错。
+     */
     public PlanSessionView view(String planSessionId) {
         PlanSessionState state = store.require(planSessionId);
         synchronized (state.getLock()) {
@@ -130,6 +129,12 @@ public class PlanningSessionService {
         }
     }
 
+    /**
+     * 向等待中的规划问题提交抉择。仅在 {@code WAITING_INPUT} 且 {@code taskId} 与当前
+     * 问题匹配时接受；校验通过后清空等待态并唤醒规划线程的阻塞队列。
+     *
+     * @throws BusinessException 会话已结束、未在等待或抉择内容非法时抛出
+     */
     public AcceptedResponse submitInput(String planSessionId,
                                         String taskId,
                                         String selectedOptionId,
@@ -153,6 +158,10 @@ public class PlanningSessionService {
         return new AcceptedResponse(planSessionId, taskId, selectedOptionId, customInput);
     }
 
+    /**
+     * 对 {@code READY} 状态的计划发起一次提示词修订：递增版本号、记录修订说明，
+     * 再把会话切回 {@code RUNNING} 异步重跑规划 Agent。非 {@code READY} 状态拒绝修订。
+     */
     public void revise(String planSessionId, String instruction) {
         PlanSessionState state = store.require(planSessionId);
         String note = instruction == null ? "" : instruction.trim();
@@ -171,6 +180,15 @@ public class PlanningSessionService {
         submitPlanning(state, note);
     }
 
+    /**
+     * 确认计划并创建主任务。确认前重新校验 Git 仓库，把当前分支作为原始分支交给
+     * {@link RunService#createFromPlan}；成功后发布终止事件、关闭规划 SSE 并释放锁。
+     *
+     * <p>创建失败时会重新获取仓库锁并把异常抛给调用方，会话保持原状态以便重试；
+     * 因此本方法对同一会话不能并发确认。</p>
+     *
+     * @throws BusinessException 会话未就绪、缺少计划或 Git 校验失败时抛出
+     */
     public ConfirmPlanSessionResponse confirm(String planSessionId) {
         PlanSessionState state = store.require(planSessionId);
         EventPayload.Plan plan;
@@ -199,7 +217,7 @@ public class PlanningSessionService {
         lockService.release(root, owner);
         try {
             ConfirmPlanSessionResponse response = runService.createFromPlan(
-                    draft, revision, state.getMockScript(), workingDir, repo.branch());
+                    draft, revision, workingDir, repo.branch());
             synchronized (state.getLock()) {
                 state.setStatus(PlanSessionStatus.CONFIRMED);
                 store.publish(state, EventType.RUN_COMPLETED,
@@ -215,6 +233,9 @@ public class PlanningSessionService {
         }
     }
 
+    /**
+     * 取消规划会话：幂等处理终止态，发布 {@code RUN_COMPLETED} 后释放仓库锁并关闭 SSE。
+     */
     public void cancel(String planSessionId) {
         PlanSessionState state = store.require(planSessionId);
         synchronized (state.getLock()) {
@@ -230,6 +251,10 @@ public class PlanningSessionService {
         sseService.close(planSessionId);
     }
 
+    /**
+     * 把规划任务提交到共享编排线程池。线程池拒绝时立即将会话置为失败，
+     * 避免调用方一直等待不会有结果的规划。
+     */
     private void submitPlanning(PlanSessionState state, String instruction) {
         try {
             orchestrationExecutor.submit(() -> runPlanning(state, instruction));
@@ -260,6 +285,10 @@ public class PlanningSessionService {
         }
     }
 
+    /**
+     * 统一的失败收尾：仅在非终止态写入 {@code FAILED} 与错误信息，发布 {@code ERROR}
+     * 事件后释放仓库锁并关闭 SSE。重复调用会被终止态检查短路。
+     */
     private void fail(PlanSessionState state, String code, String message) {
         synchronized (state.getLock()) {
             if (state.isTerminal()) {
@@ -274,38 +303,10 @@ public class PlanningSessionService {
         sseService.close(state.getPlanSessionId());
     }
 
-    private void publishMockPlan(PlanSessionState state) {
-        PlanDraftView draftView = planDraftService.generate(state.getMockScript(), state.getGoal());
-        List<EventPayload.PlannedTask> tasks = new ArrayList<>();
-        tasks.add(new EventPayload.PlannedTask(
-                PlanningAgent.PLAN_ROOT_ID, null, draftView.title(),
-                "coordinator", List.of(), draftView.goal(),
-                List.of("按计划完成 Mock 演练"), null, null));
-        int order = 0;
-        for (PlanRowView row : draftView.rows()) {
-            order++;
-            String taskId = row.taskId() == null || row.taskId().isBlank()
-                    ? "t_" + order : row.taskId();
-            String output = row.output() == null || row.output().isBlank()
-                    ? "可复核结果" : row.output();
-            tasks.add(new EventPayload.PlannedTask(
-                    taskId,
-                    PlanningAgent.PLAN_ROOT_ID,
-                    row.title(),
-                    row.agent(),
-                    List.of(),
-                    row.description() == null || row.description().isBlank()
-                            ? row.title() : row.description(),
-                    List.of(output),
-                    row.allowedTools() == null || row.allowedTools().isEmpty()
-                            ? List.copyOf(ToolRegistry.EXECUTION_TOOLS)
-                            : row.allowedTools(),
-                    row.testCommand()));
-        }
-        store.publish(state, EventType.PLAN, PlanningAgent.PLAN_ROOT_TASK,
-                new EventPayload.Plan(tasks, 1, "Mock 计划", null));
-    }
-
+    /**
+     * 按会话记录的工作目录根释放锁。只有确实持有过根路径时才执行释放，
+     * 避免确认成功后再次调用误释放其他会话的锁。
+     */
     private void releaseLock(String planSessionId) {
         Path root = workingRoots.remove(planSessionId);
         if (root != null) {

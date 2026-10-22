@@ -14,6 +14,14 @@ public final class InputValidation {
     private InputValidation() {
     }
 
+    /**
+     * 校验一次抉择提交：选项与自由输入至少一个非空；自由输入受长度与
+     * {@code allowCustom} 限制；选项 ID 必须属于当前问题。两侧空白会被裁剪。
+     *
+     * @throws BusinessException 自由输入超长 / 不被允许、选项不存在或两者皆空时抛出
+     *                           {@link ErrorCode#INVALID_INPUT} 或
+     *                           {@link ErrorCode#INVALID_OPTION}
+     */
     public static UserInput validate(WaitingInputState waiting,
                                      String selectedOptionId,
                                      String customInput) {
@@ -40,6 +48,9 @@ public final class InputValidation {
         return new UserInput(optionId, custom);
     }
 
+    /**
+     * 裁剪两端空白；空白字符串折叠为 {@code null}，便于统一做“未提供”判断。
+     */
     public static String trimToNull(String value) {
         if (value == null) {
             return null;
@@ -48,6 +59,10 @@ public final class InputValidation {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
+    /**
+     * 生成用于事件展示的选择描述：选项转为中文标签，自由输入以“补充：”拼接。
+     * 未知选项 ID 不会报错，只输出自由输入部分。
+     */
     public static String describeSelection(EventPayload.WaitingInput waiting, UserInput input) {
         StringBuilder builder = new StringBuilder();
         if (input.selectedOptionId() != null) {

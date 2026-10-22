@@ -40,8 +40,12 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * 把实时事件落到 MySQL。实体 CRUD 使用 MyBatis-Plus 的 Service / Mapper 基础方法，
- * 这里只负责“事件 -> 主任务 / 子任务 / 提示词 / 中间结果 / 事件原文”的映射。
+ * 运行事件持久化服务：把实时运行事件同步映射到 MySQL 领域表。
+ * <p>每次 {@link #persist(RunState, EventEnvelope)} 在一个事务内先追加事件原文，
+ * 再按事件类型更新主任务、直属子任务、提示词、中间结果或审核记录；任一写入失败都会
+ * 回滚该事件的全部落库，但异常最终由 {@code EventPublisher} 捕获，保证不影响 SSE 展示。</p>
+ * <p>这里只接受已落库的主任务和两层任务模型：主任务未知时跳过，计划中的非直属子任务
+ * 只告警；运行终止事件会修复尚未到达终态的子任务，避免档案长期停留在执行中状态。</p>
  */
 @Service
 public class RunPersistenceService {
@@ -75,12 +79,18 @@ public class RunPersistenceService {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 创建 PENDING 主任务档案，并在提供工作目录时写入一对一目录记录。
+     * <p>主任务与目录写入处于同一事务；空标题使用占位值，随后由 {@code plan} 事件
+     * 补全根任务标题。工作目录为空时不写 {@code tn_main_task_workspace}。</p>
+     *
+     * @return 已保存的主任务实体（含自增主键）
+     */
     @Transactional
     public MainTaskEntity createPending(String mainTaskId,
                                         String runId,
                                         String title,
                                         String goal,
-                                        String mockScript,
                                         String workingDir) {
         LocalDateTime now = LocalDateTime.now();
         MainTaskEntity entity = new MainTaskEntity();
@@ -88,7 +98,6 @@ public class RunPersistenceService {
         entity.setRunId(runId);
         entity.setTitle(title == null || title.isBlank() ? "待规划主任务" : title);
         entity.setGoal(goal);
-        entity.setMockScript(mockScript);
         entity.setStatus(MainTaskStatus.PENDING.name());
         entity.setCreatedAt(now);
         entity.setUpdatedAt(now);
@@ -104,6 +113,13 @@ public class RunPersistenceService {
         return entity;
     }
 
+    /**
+     * 启动阶段失败时把主任务直接置为 FAILED，并记录错误与结束时间。
+     * <p>只更新已存在的主任务；找不到记录时静默返回，避免启动失败路径二次抛错。</p>
+     *
+     * @param mainTaskId 主任务业务 ID
+     * @param message 失败原因
+     */
     @Transactional
     public void markStartFailed(String mainTaskId, String message) {
         MainTaskEntity main = findByMainTaskId(mainTaskId);
@@ -118,8 +134,21 @@ public class RunPersistenceService {
     }
 
     /**
-     * 事务失败会回滚整条事件的所有落库；调用方（EventPublisher）负责记录日志，
-     * 保证持久化故障不会阻断 SSE 展示。
+     * 持久化一个事件原文及其对应的领域表副作用。
+     *
+     * <p>事务覆盖事件原文、主任务/子任务投影、提示词、中间结果与审核记录，任一写入抛错
+     * 都会整体回滚，由调用方记录日志。主任务尚未落库时告警并跳过该事件。成功写入原文后
+     * 按类型分派映射：</p>
+     * <ul>
+     *   <li>{@code RUN_STARTED}/{@code PLAN} 及任务生命周期事件更新主任务与直属子任务；</li>
+     *   <li>{@code TASK_THOUGHT}/{@code PROMPT_ASSEMBLED}/{@code TOOL_*} 写入中间结果或提示词；</li>
+     *   <li>{@code REVIEW_COMPLETED} 额外写入 {@code tn_task_review}；</li>
+     *   <li>{@code RUN_COMPLETED}/{@code ERROR} 落终态并修复遗留子任务；</li>
+     *   <li>{@code GIT_CHECKPOINT}/{@code HEARTBEAT} 只有事件原文，不更新领域表。</li>
+     * </ul>
+     *
+     * @param run 内存运行状态，提供主任务与子任务投影
+     * @param event 已分配序号的事件信封
      */
     @Transactional
     public void persist(RunState run, EventEnvelope event) {
@@ -155,6 +184,7 @@ public class RunPersistenceService {
         }
     }
 
+    /** 将 run_started 的目标写回主任务，并把更新时间推进到事件时间。 */
     private void applyRunStarted(MainTaskEntity main, EventEnvelope event) {
         if (event.payload() instanceof EventPayload.RunStarted started) {
             main.setGoal(started.goal());
@@ -163,6 +193,12 @@ public class RunPersistenceService {
         mainTaskService.updateById(main);
     }
 
+    /**
+     * 根据 plan 事件建立或重排直属子任务。
+     * <p>先从无 {@code parentTaskId} 的任务中确定根任务，再只为父任务等于根任务的行落
+     * {@code tn_subtask}；非两层任务只告警。已有 PENDING 子任务可更新标题、Agent、顺序和依赖，
+     * 不在新计划中的 PENDING 子任务标记 CANCELLED；已开始或终态子任务不参与重排。</p>
+     */
     private void applyPlan(RunState run, MainTaskEntity main, EventEnvelope event) {
         if (!(event.payload() instanceof EventPayload.Plan plan)) {
             return;
@@ -231,6 +267,7 @@ public class RunPersistenceService {
         }
     }
 
+    /** 按根任务 ID 分流：根任务事件更新主任务，其余事件创建或更新直属子任务。 */
     private void applyTaskStatus(RunState run, MainTaskEntity main, EventEnvelope event) {
         TaskRef task = event.task();
         if (task == null) {
@@ -262,6 +299,10 @@ public class RunPersistenceService {
         }
     }
 
+    /**
+     * 把任务生命周期事件投射到主任务状态；已 COMPLETED/FAILED 的主任务不再回退。
+     * 等待抉择的问题与选项随事件写入，收到输入后清空等待字段。
+     */
     private void applyMainStatus(MainTaskEntity main, MainTaskState state, EventEnvelope event) {
         String current = main.getStatus();
         if (MainTaskStatus.COMPLETED.name().equals(current) || MainTaskStatus.FAILED.name().equals(current)) {
@@ -313,6 +354,10 @@ public class RunPersistenceService {
         touch(main, event.timestamp());
     }
 
+    /**
+     * 把任务生命周期事件投射到子任务状态；SUCCESS/FAILED/CANCELLED 为终态，不再变更。
+     * {@code retryable=true} 的失败和 REWORK 审核都进入 RETRYING，等待下一轮执行。
+     */
     private void applySubtaskStatus(SubtaskEntity subtask, TaskNodeState state, EventEnvelope event) {
         String current = subtask.getStatus();
         if (SubtaskStatus.SUCCESS.name().equals(current)
@@ -377,6 +422,7 @@ public class RunPersistenceService {
         subtask.setUpdatedAt(toLocal(event.timestamp()));
     }
 
+    /** 仅保存直属子任务的 review_completed；根任务审核和缺失任务不写审核表。 */
     private void saveReview(RunState run, EventEnvelope event) {
         if (!(event.payload() instanceof EventPayload.ReviewCompleted review)
                 || event.task() == null
@@ -398,6 +444,7 @@ public class RunPersistenceService {
         reviewService.save(entity);
     }
 
+    /** 思考增量作为 THOUGHT 中间结果保存，content 为 JSON 字符串。 */
     private void saveThought(RunState run, EventEnvelope event) {
         if (!(event.payload() instanceof EventPayload.TaskThought thought) || event.task() == null) {
             return;
@@ -407,6 +454,7 @@ public class RunPersistenceService {
         artifactService.save(artifact);
     }
 
+    /** prompt_assembled 每出现一次写一行提示词，seq 记录对应事件序号。 */
     private void savePrompt(RunState run, EventEnvelope event) {
         if (!(event.payload() instanceof EventPayload.PromptAssembled prompt) || event.task() == null) {
             return;
@@ -423,6 +471,7 @@ public class RunPersistenceService {
         promptService.save(entity);
     }
 
+    /** 工具调用先以 TOOL_CALL 行保存，状态为空表示尚未配对结果。 */
     private void saveToolCall(RunState run, EventEnvelope event) {
         if (!(event.payload() instanceof EventPayload.ToolCall call) || event.task() == null) {
             return;
@@ -434,6 +483,10 @@ public class RunPersistenceService {
         artifactService.save(artifact);
     }
 
+    /**
+     * 工具结果优先按 callId 回填未完成的调用；callId 缺失时按工具名匹配最近一条调用。
+     * 找不到配对调用时单独保存 TOOL_RESULT 行，保留孤立结果供账本核对。
+     */
     private void saveToolResult(RunState run, EventEnvelope event) {
         if (!(event.payload() instanceof EventPayload.ToolResult result) || event.task() == null) {
             return;
@@ -456,6 +509,7 @@ public class RunPersistenceService {
         artifactService.save(artifact);
     }
 
+    /** 用主任务、任务、事件序号和时间等公共字段构造一条中间结果。 */
     private TaskArtifactEntity newArtifact(RunState run, EventEnvelope event, String kind) {
         TaskArtifactEntity artifact = new TaskArtifactEntity();
         artifact.setMainTaskId(run.getMainTaskId());
@@ -466,6 +520,10 @@ public class RunPersistenceService {
         return artifact;
     }
 
+    /**
+     * 在同一主任务、同一子任务的未完成 TOOL_CALL 中配对：有 callId 时精确匹配，
+     * 否则按事件序号倒序取最近一条同名调用；没有匹配返回 {@code null}。
+     */
     private TaskArtifactEntity findOpenToolCall(String mainTaskId,
                                                 String taskId,
                                                 String callId,
@@ -488,6 +546,7 @@ public class RunPersistenceService {
         return null;
     }
 
+    /** 运行正常结束：非终态主任务置 COMPLETED，并修复仍未结束的子任务。 */
     private void applyRunCompleted(RunState run, MainTaskEntity main, EventEnvelope event) {
         if (!isTerminal(main.getStatus())) {
             if (event.payload() instanceof EventPayload.RunCompleted completed && main.getSummary() == null) {
@@ -503,6 +562,7 @@ public class RunPersistenceService {
                 event.timestamp());
     }
 
+    /** 运行错误：非终态主任务置 FAILED，并修复仍未结束的子任务。 */
     private void applyError(RunState run, MainTaskEntity main, EventEnvelope event) {
         if (!isTerminal(main.getStatus())) {
             if (event.payload() instanceof EventPayload.Error error) {
@@ -519,6 +579,10 @@ public class RunPersistenceService {
         repairSubtasks(main, message, event.timestamp());
     }
 
+    /**
+     * 终止修复：把未到 SUCCESS/FAILED/CANCELLED 的子任务统一标记 FAILED。
+     * 已有的子任务错误保留，缺失时写入运行级错误原因。
+     */
     private void repairSubtasks(MainTaskEntity main, String message, Instant timestamp) {
         List<SubtaskEntity> subtasks = subtaskService.list(
                 Wrappers.<SubtaskEntity>lambdaQuery()
@@ -537,6 +601,7 @@ public class RunPersistenceService {
         }
     }
 
+    /** 把事件信封序列化为原文行；运行级事件的 task_id 保持为空。 */
     private void saveEvent(RunState run, EventEnvelope event) {
         RunEventEntity entity = new RunEventEntity();
         entity.setMainTaskId(run.getMainTaskId());
@@ -551,12 +616,14 @@ public class RunPersistenceService {
         eventService.save(entity);
     }
 
+    /** 按业务 ID 查主任务；未知返回 {@code null}，由调用方决定是否跳过。 */
     private MainTaskEntity findByMainTaskId(String mainTaskId) {
         return mainTaskService.getOne(
                 Wrappers.<MainTaskEntity>lambdaQuery()
                         .eq(MainTaskEntity::getMainTaskId, mainTaskId));
     }
 
+    /** 在指定主任务内按业务 ID 查直属子任务。 */
     private SubtaskEntity findSubtask(String mainTaskId, String taskId) {
         return subtaskService.getOne(
                 Wrappers.<SubtaskEntity>lambdaQuery()
@@ -564,25 +631,30 @@ public class RunPersistenceService {
                         .eq(SubtaskEntity::getTaskId, taskId));
     }
 
+    /** 统一把主任务更新时间推进到事件时间。 */
     private void touch(MainTaskEntity main, Instant timestamp) {
         main.setUpdatedAt(toLocal(timestamp));
     }
 
+    /** 按系统时区把事件时间转换为数据库使用的 {@link LocalDateTime}。 */
     private LocalDateTime toLocal(Instant instant) {
         return LocalDateTime.ofInstant(instant, ZoneId.systemDefault());
     }
 
+    /** 主任务 COMPLETED/FAILED 为终态，不再被后续状态事件改写。 */
     private boolean isTerminal(String status) {
         return MainTaskStatus.COMPLETED.name().equals(status)
                 || MainTaskStatus.FAILED.name().equals(status);
     }
 
+    /** 子任务 SUCCESS/FAILED/CANCELLED 为终态，重排与状态投射都跳过。 */
     private boolean isTerminalSubtask(String status) {
         return SubtaskStatus.SUCCESS.name().equals(status)
                 || SubtaskStatus.FAILED.name().equals(status)
                 || SubtaskStatus.CANCELLED.name().equals(status);
     }
 
+    /** 序列化 JSON 列；失败记录告警并返回 {@code null}，交由调用方/数据库约束处理。 */
     private String writeJson(Object value) {
         if (value == null) {
             return null;
@@ -595,6 +667,12 @@ public class RunPersistenceService {
         }
     }
 
+    /**
+     * 按计划顺序读取指定主任务的全部直属子任务，供动态重排比对。
+     *
+     * @param mainTaskId 主任务业务 ID
+     * @return 按 {@code sort_order} 升序排列的子任务实体
+     */
     public List<SubtaskEntity> subtasksOf(String mainTaskId) {
         return subtaskService.list(Wrappers.<SubtaskEntity>lambdaQuery()
                 .eq(SubtaskEntity::getMainTaskId, mainTaskId)

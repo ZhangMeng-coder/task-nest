@@ -2,14 +2,16 @@ package com.tasknest.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-import java.util.ArrayList;
-import java.util.List;
-
+/**
+ * {@code tasknest.*} 配置绑定。
+ *
+ * <p>当前只包含 {@code sse} 一组配置，控制 SSE 连接超时与心跳间隔。
+ * 默认值与 {@code application.yml} 保持一致，配置缺失时仍可运行。</p>
+ */
 @ConfigurationProperties(prefix = "tasknest")
 public class TaskNestProperties {
 
     private Sse sse = new Sse();
-    private Mock mock = new Mock();
 
     public Sse getSse() {
         return sse;
@@ -19,14 +21,10 @@ public class TaskNestProperties {
         this.sse = sse;
     }
 
-    public Mock getMock() {
-        return mock;
-    }
-
-    public void setMock(Mock mock) {
-        this.mock = mock;
-    }
-
+    /**
+     * SSE 配置：{@code timeoutMs} 为连接超时（默认 1 小时），
+     * {@code heartbeatMs} 为心跳间隔（默认 15 秒），心跳事件也占用 seq。
+     */
     public static class Sse {
         private long timeoutMs = 3_600_000L;
         private long heartbeatMs = 15_000L;
@@ -45,28 +43,6 @@ public class TaskNestProperties {
 
         public void setHeartbeatMs(long heartbeatMs) {
             this.heartbeatMs = heartbeatMs;
-        }
-    }
-
-    public static class Mock {
-        private List<String> scripts = new ArrayList<>(
-                List.of("happy-path", "with-ambiguity", "with-failure", "with-noise"));
-        private double delayScale = 1.0d;
-
-        public List<String> getScripts() {
-            return scripts;
-        }
-
-        public void setScripts(List<String> scripts) {
-            this.scripts = scripts;
-        }
-
-        public double getDelayScale() {
-            return delayScale;
-        }
-
-        public void setDelayScale(double delayScale) {
-            this.delayScale = delayScale;
         }
     }
 }

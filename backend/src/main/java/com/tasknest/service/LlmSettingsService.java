@@ -21,8 +21,13 @@ import java.time.ZoneId;
 import java.util.regex.Pattern;
 
 /**
- * LLM 连接设置：启动时从 MySQL 自动加载，保存后立即替换内存中的运行时快照。
- * 当前阶段只提供配置，不会发起真实模型请求。
+ * OpenAI 兼容 LLM 的连接设置（单例表 {@code tn_llm_setting} 与
+ * {@code tn_llm_setting_model}，{@code id=1}）。
+ *
+ * <p>启动时从 MySQL 自动加载，保存后立即替换 volatile 运行时快照，供
+ * {@code LlmClient} 发起真实请求、{@link SecretProvider} 收集脱敏值使用。
+ * LITERAL 模式的密钥读取接口只返回掩码；ENV 模式只保存变量名，
+ * 并在实际取用时解析环境变量。日志不得输出密钥本身。</p>
  */
 @Service
 public class LlmSettingsService {
@@ -46,6 +51,11 @@ public class LlmSettingsService {
         this.modelSettingService = modelSettingService;
     }
 
+    /**
+     * 启动加载两张单例表。任一张存在即合并读取；都缺失时使用默认 OpenAI
+     * 兼容配置（ENV 模式、{@code OPENAI_API_KEY}）。读取异常回退默认快照，
+     * 不阻止应用启动。
+     */
     @PostConstruct
     public void load() {
         try {
@@ -66,6 +76,10 @@ public class LlmSettingsService {
         }
     }
 
+    /**
+     * 构造对外视图。LITERAL 密钥只返回尾 4 位掩码（长度不超过 4 时返回
+     * {@code ****}）；ENV 模式返回变量名而非解析后的值。
+     */
     public LlmSettingsView view() {
         CurrentLlmSettings snapshot = current;
         boolean literal = snapshot.apiKeyType() == ApiKeyType.LITERAL;
@@ -84,6 +98,15 @@ public class LlmSettingsService {
                 snapshot.updatedAt());
     }
 
+    /**
+     * 校验并保存连接设置（两张表在同一事务内），写完两张表后替换运行时快照；
+     * 快照替换发生在事务提交前，提交失败时内存与库可能短暂不一致。
+     * LITERAL 模式提交空白密钥时，若库中已有 literal 密钥则沿用旧值，
+     * 便于前端以掩码展示且留空不覆盖。
+     *
+     * @throws BusinessException Base URL / 模型名 / 环境变量名非法，或缺少密钥时抛出
+     *                           {@link ErrorCode#INVALID_PARAM}
+     */
     @Transactional
     public LlmSettingsView update(UpdateLlmSettingsRequest request) {
         String baseUrl = normalizeBaseUrl(request.baseUrl());
@@ -122,12 +145,17 @@ public class LlmSettingsService {
     }
 
     /**
-     * 供后续 P3 编排器读取当前配置；ENV 模式每次调用都会重新解析环境变量。
+     * 返回当前运行时快照。ENV 模式下 {@code apiKeyValue} 仍是变量名，
+     * 需要实际密钥时调用 {@link #resolveApiKey()}。
      */
     public CurrentLlmSettings current() {
         return current;
     }
 
+    /**
+     * 解析可直接用于请求的密钥。ENV 模式每次调用都重新读取环境变量，
+     * 因此修改变量值无需重启；变量不存在时返回 {@code null}。
+     */
     public String resolveApiKey() {
         CurrentLlmSettings snapshot = current;
         if (snapshot.apiKeyType() == ApiKeyType.ENV) {
@@ -222,6 +250,9 @@ public class LlmSettingsService {
         return value == null ? null : value.atZone(ZoneId.systemDefault()).toInstant();
     }
 
+    /**
+     * 只暴露尾 4 位，避免把完整密钥返回给前端或写入日志。
+     */
     private String mask(String value) {
         if (!hasText(value)) {
             return null;

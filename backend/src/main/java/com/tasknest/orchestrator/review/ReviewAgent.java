@@ -29,6 +29,11 @@ import java.util.concurrent.TimeUnit;
 /**
  * 独立审核 Agent：先由平台在子任务分支上执行测试，再让模型只读代码并给出结构化结论。
  * 平台强制执行判定规则，模型输出不能绕过失败测试或源码副作用。
+ *
+ * <p>由编排器在子任务提交后调用。流程固定为：取消检查 → 平台测试与副作用检查 →
+ * 模型审核（最多 2 次调用）→ 严格 JSON 解析 → {@code enforce} 重写 verdict。
+ * 审核模式没有写工具，Shell 受 {@code ReviewCommandPolicy} 限制；模型结论只是输入，
+ * 平台证据优先。模型两次调用都失败时抛 {@code REVIEW_UNAVAILABLE}。
  */
 @Component
 public class ReviewAgent {
@@ -54,6 +59,16 @@ public class ReviewAgent {
         this.testRunner = testRunner;
     }
 
+    /**
+     * 执行一次完整审核并返回平台强制后的结论。
+     *
+     * <p>先检查取消，再运行平台测试；测试产生工作区副作用时直接 REWORK，不再调用模型。
+     * 模型每次输出都会校验 verdict / testStatus 结构，失败时最多重试一次。
+     * 取消返回 {@code cancelled=true} 的结果，编排器不应据此发起重做。
+     *
+     * @param context 审核输入，含变更文件、测试命令与上一轮问题
+     * @throws AgentException REVIEW_UNAVAILABLE，模型调用两次均失败
+     */
     public ReviewResult review(AgentSession session, TaskRef taskRef,
                                Path root, ReviewContext context) {
         long started = System.nanoTime();
@@ -63,6 +78,7 @@ public class ReviewAgent {
         }
         ReviewTestRunner.Evidence evidence = testRunner.run(
                 root, context.testCommand(), secrets::values);
+        // 测试必须只读；出现工作区副作用时平台直接判 REWORK，不让模型推翻。
         if (evidence.hasSideEffects()) {
             return sideEffectResult(evidence, started);
         }
@@ -82,6 +98,7 @@ public class ReviewAgent {
                 PromptFactory.reviewSystem(context.workingDir()), userPrompt);
 
         RuntimeException lastFailure = null;
+        // 模型输出可能不稳定，最多重试一次；两次都失败才判定审核不可用。
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
                 ToolExecutor executor = new ToolExecutor(
@@ -104,6 +121,7 @@ public class ReviewAgent {
                 lastFailure);
     }
 
+    /** 解析模型 JSON；结构错误或 verdict / testStatus 非法时抛 REVIEW_INVALID_OUTPUT。 */
     private ReviewResult parse(String content, ReviewTestRunner.Evidence evidence) {
         JsonNode root = readJson(content);
         String rawVerdict = root.path("verdict").asText("").trim().toUpperCase(Locale.ROOT);
@@ -154,6 +172,10 @@ public class ReviewAgent {
                 modelName, 0, false);
     }
 
+    /**
+     * 用平台测试证据覆盖模型结论：失败测试、阻塞问题、源码变更但测试不可用都强制 REWORK；
+     * REWORK 但模型未给出问题时补一条通用 MAJOR，保证退回意见可执行。
+     */
     private ReviewResult enforce(ReviewResult parsed,
                                  ReviewTestRunner.Evidence evidence,
                                  ReviewContext context,
@@ -162,6 +184,7 @@ public class ReviewAgent {
         String testStatus = parsed.testStatus();
         String verdict = parsed.verdict();
 
+        // 平台证据只能收紧结论：失败不能翻成通过，通过可以修正模型的 UNAVAILABLE。
         if ("FAILED".equals(evidence.testStatus())) {
             testStatus = "FAILED";
         } else if ("PASSED".equals(evidence.testStatus())
@@ -288,6 +311,7 @@ public class ReviewAgent {
             String name = file == null ? "" : file.trim();
             int dot = name.lastIndexOf('.');
             String extension = dot < 0 ? "" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
+            // 仅文档 / 配置类扩展名不要求可执行测试，其余变更都视为源码。
             if (!NON_SOURCE_EXTENSIONS.contains(extension)) {
                 return true;
             }

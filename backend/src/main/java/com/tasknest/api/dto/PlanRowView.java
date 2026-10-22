@@ -6,8 +6,12 @@ import jakarta.validation.constraints.Size;
 import java.util.List;
 
 /**
- * 计划表中的一行。只描述主任务直属的一层子任务，与执行时的 plan 事件一一对应。
- * P3 新增字段均为可选，旧前端与旧档案可以省略。
+ * 计划表中的一行，只描述主任务直属的一层子任务，与执行时的 {@code plan} 事件一一对应。
+ *
+ * <p>{@code title} 与 {@code agent} 必填；{@code dependency}、{@code output} 为展示与
+ * 调度辅助信息。P3 新增字段 {@code taskId}、{@code description}、
+ * {@code acceptanceCriteria}、{@code allowedTools}、{@code testCommand} 均为可选，
+ * 旧前端与旧档案可以省略。{@code testCommand} 为 {@code none} 时审核阶段自动探测测试命令。</p>
  */
 public record PlanRowView(
         @NotBlank(message = "计划步骤标题不能为空")

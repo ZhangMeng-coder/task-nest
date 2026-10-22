@@ -25,7 +25,6 @@ import org.springframework.web.util.UriComponentsBuilder;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -36,7 +35,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
@@ -95,40 +93,6 @@ class WorkspaceAndSettingsIntegrationTest {
         ResponseEntity<JsonNode> missing = directoryListing(temp.resolve("does-not-exist"));
         assertEquals(HttpStatus.BAD_REQUEST, missing.getStatusCode());
         assertEquals(40004, missing.getBody().get("code").asInt());
-    }
-
-    @Test
-    @Timeout(40)
-    void storesWorkingDirectoryOnCreateDetailAndList(@TempDir Path temp) throws Exception {
-        String workingDir = temp.toRealPath().toString();
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("mockScript", "happy-path");
-        body.put("goal", "验证工作目录持久化");
-        body.put("workingDir", workingDir);
-
-        ResponseEntity<JsonNode> created = rest.postForEntity(
-                url("/api/main-tasks"), body, JsonNode.class);
-        assertEquals(HttpStatus.CREATED, created.getStatusCode(), String.valueOf(created.getBody()));
-        JsonNode data = created.getBody().get("data");
-        String mainTaskId = data.get("mainTaskId").asText();
-        String runId = data.get("runId").asText();
-        assertEquals(workingDir, data.get("workingDir").asText());
-
-        awaitTerminal(runId);
-
-        JsonNode detail = detail(mainTaskId);
-        assertEquals(workingDir, detail.get("mainTask").get("workingDir").asText());
-        JsonNode listed = findInList(mainTaskId);
-        assertNotNull(listed);
-        assertEquals(workingDir, listed.get("workingDir").asText());
-
-        Map<String, Object> invalid = new LinkedHashMap<>();
-        invalid.put("mockScript", "happy-path");
-        invalid.put("workingDir", temp.resolve("missing-folder").toString());
-        ResponseEntity<JsonNode> rejected = rest.postForEntity(
-                url("/api/main-tasks"), invalid, JsonNode.class);
-        assertEquals(HttpStatus.BAD_REQUEST, rejected.getStatusCode());
-        assertEquals(40004, rejected.getBody().get("code").asInt());
     }
 
     @Test
@@ -249,46 +213,6 @@ class WorkspaceAndSettingsIntegrationTest {
                 HttpMethod.PUT,
                 new HttpEntity<>(body),
                 JsonNode.class);
-    }
-
-    private JsonNode detail(String mainTaskId) {
-        ResponseEntity<JsonNode> response = rest.getForEntity(
-                url("/api/main-tasks/" + mainTaskId), JsonNode.class);
-        assertEquals(HttpStatus.OK, response.getStatusCode(), String.valueOf(response.getBody()));
-        return response.getBody().get("data");
-    }
-
-    private JsonNode findInList(String mainTaskId) {
-        ResponseEntity<JsonNode> response = rest.getForEntity(
-                url("/api/main-tasks?limit=200"), JsonNode.class);
-        assertEquals(HttpStatus.OK, response.getStatusCode());
-        for (JsonNode item : response.getBody().get("data")) {
-            if (mainTaskId.equals(item.get("mainTaskId").asText())) {
-                return item;
-            }
-        }
-        return null;
-    }
-
-    private void awaitTerminal(String runId) {
-        long deadline = System.nanoTime() + Duration.ofSeconds(25).toNanos();
-        while (System.nanoTime() < deadline) {
-            ResponseEntity<JsonNode> response = rest.getForEntity(
-                    url("/api/runs/" + runId), JsonNode.class);
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                String status = response.getBody().get("data").get("run").get("status").asText();
-                if ("COMPLETED".equals(status) || "FAILED".equals(status)) {
-                    return;
-                }
-            }
-            try {
-                Thread.sleep(80);
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-                fail("等待运行结束时被中断");
-            }
-        }
-        fail("运行未在超时前结束");
     }
 
     private String url(String path) {

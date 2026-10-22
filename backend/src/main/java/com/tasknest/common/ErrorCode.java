@@ -2,11 +2,19 @@ package com.tasknest.common;
 
 import org.springframework.http.HttpStatus;
 
+/**
+ * 业务错误码与 HTTP 状态映射，是 REST 错误契约的唯一来源。
+ *
+ * <p>编码按区间划分：{@code 400xx} 为请求 / 参数 / Git 前置条件错误（HTTP 400）；
+ * {@code 404xx} 为资源不存在（404）；{@code 409xx} 为状态冲突（409）；
+ * {@code 500xx} 为服务内部错误（500）；{@code 502xx} 为上游模型错误（502）；
+ * {@code 503xx} 为依赖不可用（503）。新增错误码时需保持区间语义，并同步
+ * {@code docs/requirements.md} 与前端错误处理。</p>
+ */
 public enum ErrorCode {
 
     INVALID_PARAM(40001, HttpStatus.BAD_REQUEST, "参数校验失败"),
     INVALID_AFTER_SEQ(40002, HttpStatus.BAD_REQUEST, "afterSeq 非法"),
-    INVALID_SCRIPT(40003, HttpStatus.BAD_REQUEST, "不支持的 Mock 脚本"),
     INVALID_WORKING_DIR(40004, HttpStatus.BAD_REQUEST, "工作目录不存在或不可访问"),
     DIRECTORY_NOT_READABLE(40005, HttpStatus.BAD_REQUEST, "无法读取目录"),
     INVALID_INPUT(40006, HttpStatus.BAD_REQUEST, "抉择提交不合法"),
@@ -31,7 +39,6 @@ public enum ErrorCode {
     GIT_BRANCH_DRIFT(40911, HttpStatus.CONFLICT, "运行期间 Git 分支被外部切换"),
     GIT_MERGE_CONFLICT(40912, HttpStatus.CONFLICT, "Git 合并冲突"),
     INTERNAL(50001, HttpStatus.INTERNAL_SERVER_ERROR, "服务内部错误"),
-    INVALID_MOCK_SCRIPT(50002, HttpStatus.INTERNAL_SERVER_ERROR, "内置 Mock 脚本无效或缺失"),
     GIT_BRANCH_CREATE_FAILED(50010, HttpStatus.INTERNAL_SERVER_ERROR, "Git 分支创建失败"),
     GIT_COMMIT_FAILED(50011, HttpStatus.INTERNAL_SERVER_ERROR, "Git 提交失败"),
     GIT_ROLLBACK_FAILED(50012, HttpStatus.INTERNAL_SERVER_ERROR, "Git 回滚失败"),
@@ -50,14 +57,23 @@ public enum ErrorCode {
         this.defaultMessage = defaultMessage;
     }
 
+    /**
+     * 返回放入 {@link ApiResponse#code()} 的数值业务码。
+     */
     public int code() {
         return code;
     }
 
+    /**
+     * 返回该错误码对应的 HTTP 状态。
+     */
     public HttpStatus httpStatus() {
         return httpStatus;
     }
 
+    /**
+     * 返回可直接展示的默认错误文案。
+     */
     public String defaultMessage() {
         return defaultMessage;
     }

@@ -7,7 +7,9 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
 
 /**
- * LLM 连接设置。单例表，固定 id = 1。
+ * {@code tn_llm_setting} LLM 连接设置实体，单例表固定 {@code id = 1}。
+ * <p>由 {@code LlmSettingsService} 加载与保存；{@code api_key_type} 区分
+ * {@code LITERAL}/{@code ENV}，{@code api_key_value} 分别保存字面密钥或环境变量名。</p>
  */
 @TableName("tn_llm_setting")
 public class LlmSettingEntity {

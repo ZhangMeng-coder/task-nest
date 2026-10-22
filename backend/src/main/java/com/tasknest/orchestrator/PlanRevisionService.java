@@ -25,6 +25,18 @@ import java.util.Set;
 @Service
 public class PlanRevisionService {
 
+    /**
+     * 基于当前计划与子任务状态快照生成重排后的计划。
+     *
+     * <p>只有 PENDING（或尚未建立投影）的任务允许新增或修改；已开始/已结束的任务必须保持
+     * 原定义，否则抛 {@code PLAN_REVISION_INVALID}。草稿中缺失的 PENDING 任务转为
+     * CANCELLED（并入 changedTaskIds 通知前端），非 PENDING 的缺失任务则原样保留。
+     * 合并后校验依赖存在且未指向已取消任务，并做拓扑排序判环；revision 在旧值上递增。</p>
+     *
+     * @param statuses 当前 taskId → 子任务状态快照
+     * @param draft    主 Agent 提出的重排草案，仅包含直属子任务，根任务沿用当前计划
+     * @param reason   重排原因，写入新的 plan 事件
+     */
     public EventPayload.Plan revise(EventPayload.Plan current,
                                     Map<String, SubtaskStatus> statuses,
                                     PlanDraft draft,
@@ -111,6 +123,7 @@ public class PlanRevisionService {
                 List.copyOf(planTasks), revision, reason, List.copyOf(changed));
     }
 
+    /** 比较任务的可变定义字段；taskId 与 parentTaskId 不参与比较。 */
     public boolean sameDefinition(EventPayload.PlannedTask left,
                                   EventPayload.PlannedTask right) {
         return Objects.equals(left.title(), right.title())
@@ -122,6 +135,7 @@ public class PlanRevisionService {
                 && Objects.equals(left.testCommand(), right.testCommand());
     }
 
+    /** 用 Kahn 拓扑排序校验依赖无环，存在环时抛 {@code PLAN_REVISION_INVALID}。 */
     private void ensureAcyclic(List<EventPayload.PlannedTask> tasks) {
         Map<String, Integer> indegree = new HashMap<>();
         Map<String, List<String>> outgoing = new HashMap<>();

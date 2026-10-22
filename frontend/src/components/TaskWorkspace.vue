@@ -8,7 +8,6 @@ import {
   formatDuration,
   MAIN_TASK_STATUS_LABEL,
   mainTagType,
-  scriptName,
   subtaskTagType,
   SUBTASK_STATUS_LABEL,
 } from '@/ui/labels'
@@ -228,10 +227,6 @@ function leaveArchive(): void {
 
     <div class="task-strip">
       <div class="strip-cell">
-        <span class="strip-label mono">SCRIPT</span>
-        <span class="strip-value mono">{{ scriptName(store.mockScript ?? entry?.mockScript ?? null) }}</span>
-      </div>
-      <div class="strip-cell">
         <span class="strip-label mono">CREATED</span>
         <span class="strip-value mono">{{ formatDateTime(entry?.createdAt ?? null) }}</span>
       </div>
@@ -449,7 +444,7 @@ function leaveArchive(): void {
 
 .task-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(92px, auto)) minmax(180px, 1fr);
+  grid-template-columns: repeat(3, minmax(92px, auto)) minmax(180px, 1fr);
   align-items: center;
   gap: 0;
   padding: 13px 0;

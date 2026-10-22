@@ -6,6 +6,11 @@ import com.baomidou.mybatisplus.annotation.TableName;
 
 import java.time.LocalDateTime;
 
+/**
+ * {@code tn_plan_session_event} 规划会话事件原文，按 {@code (plan_session_id, seq)} 唯一。
+ * <p>{@code PlanSessionStore} 在规划 SSE 推送前写入，供刷新与断线重连按游标补发；
+ * {@code event_json} 以 LONGTEXT 保存完整事件信封 JSON，{@code event_time} 为事件产生时间。</p>
+ */
 @TableName("tn_plan_session_event")
 public class PlanSessionEventEntity {
 

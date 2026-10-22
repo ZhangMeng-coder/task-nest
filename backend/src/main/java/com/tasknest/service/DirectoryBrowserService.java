@@ -19,12 +19,21 @@ import java.util.stream.Stream;
 
 /**
  * 本地目录浏览：只列目录，不读取文件内容。用于页面上的工作目录选择器。
+ *
+ * <p>请求路径为空时从用户主目录开始；返回当前目录、父目录、系统根目录
+ * 以及最多 500 个直属子目录，超过上限时标记 {@code truncated}。
+ * 浏览器 {@code showDirectoryPicker()} 无法拿到绝对路径，因此目录浏览必须走后端。</p>
  */
 @Service
 public class DirectoryBrowserService {
 
     private static final int MAX_ENTRIES = 500;
 
+    /**
+     * 列出指定目录的直属子目录。结果按名称忽略大小写排序；隐藏目录
+     * 仅在 {@code showHidden} 为真时返回。目录不存在、路径非法或不可读
+     * 时抛出 {@link BusinessException}。
+     */
     public DirectoryListing list(String requestedPath, boolean showHidden) {
         Path current = resolve(requestedPath);
         List<DirectoryEntry> directories = new ArrayList<>();
@@ -60,6 +69,9 @@ public class DirectoryBrowserService {
                 truncated);
     }
 
+    /**
+     * 规范化请求路径并解析真实路径，统一后续展示与回传的绝对路径。
+     */
     private Path resolve(String requestedPath) {
         Path target;
         try {

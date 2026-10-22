@@ -11,6 +11,9 @@ public enum MainTaskStatus {
     COMPLETED,
     FAILED;
 
+    /**
+     * 是否为终态。主任务失败没有重试语义，直接进入 {@link #FAILED}。
+     */
     public boolean isTerminal() {
         return this == COMPLETED || this == FAILED;
     }

@@ -216,7 +216,6 @@ export interface SubtaskSnapshot {
 export interface RunInfo {
   runId: string
   mainTaskId: string
-  mockScript: string | null
   goal: string | null
   status: RunStatus
   createdAt: string
@@ -244,12 +243,11 @@ export interface PlanRowView {
   testCommand?: string | null
 }
 
-/** 计划表草案或持久化档案；markdown 直接用于详情展示。 */
+/** 计划表档案或确认稿；markdown 直接用于详情展示。 */
 export interface PlanDraftView {
   mainTaskId: string | null
   title: string
   goal: string
-  mockScript: string | null
   version: number
   markdown: string
   rows: PlanRowView[]
@@ -285,23 +283,12 @@ export interface AgentSettingsView {
   updatedAt: string | null
 }
 
-export interface CreateMainTaskResponse {
-  mainTaskId: string
-  runId: string
-  mockScript: string
-  workingDir: string | null
-  status: MainTaskStatus
-  createdAt: string
-  plan: PlanDraftView | null
-}
-
 export interface MainTaskSummary {
   mainTaskId: string
   runId: string
   rootTaskId: string | null
   title: string
   goal: string | null
-  mockScript: string
   workingDir: string | null
   planVersion: number
   status: MainTaskStatus
@@ -503,7 +490,8 @@ function parseStringArray(value: unknown): string[] | null {
 }
 
 function parseOptions(value: unknown): DecisionOption[] | null {
-  if (!Array.isArray(value) || value.length < 2) {
+  // 真实 ask_user 允许 0 个选项（只让用户自由输入），最多 8 个。
+  if (!Array.isArray(value) || value.length > 8) {
     return null
   }
   const options: DecisionOption[] = []

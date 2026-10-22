@@ -25,6 +25,11 @@ import java.util.function.Supplier;
 /**
  * 审核前由平台独立执行一次测试，记录命令、退出码与输出摘要；
  * 之后校验测试是否留下工作区副作用。测试在已提交的子任务分支上执行。
+ *
+ * <p>由 {@code ReviewAgent} 在模型审核前调用。命令优先取计划中的 testCommand，
+ * 否则按仓库类型自动探测；执行前经 {@link ReviewCommandPolicy} 白名单校验，
+ * 超时上限 10 分钟。执行失败、被策略拦截或超时都转换为 {@link Evidence}
+ * （UNAVAILABLE / FAILED），不向调用方抛异常，保证审核流程仍能给出结论。
  */
 @Component
 public class ReviewTestRunner {
@@ -41,6 +46,17 @@ public class ReviewTestRunner {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 在仓库根执行一次测试并收集证据。
+     *
+     * <p>测试前后各取一次 git status 以识别工作区副作用；stdout / stderr 合并后
+     * 只保留尾部 2000 字符。策略拦截或探测失败记为 UNAVAILABLE，
+     * 超时与非零退出记为 FAILED。测试执行阶段的工具异常会转换为证据，
+     * 而不是中断审核。
+     *
+     * @param plannedCommand 计划声明的测试命令；空白时自动探测
+     * @param secrets        输出脱敏用的密钥提供者，可为 null
+     */
     public Evidence run(Path root, String plannedCommand, Supplier<List<String>> secrets) {
         String command = plannedCommand == null || plannedCommand.isBlank()
                 ? detect(root) : plannedCommand.trim();
@@ -90,6 +106,7 @@ public class ReviewTestRunner {
     }
 
     private String detect(Path root) {
+        // 仅在计划未给出测试命令时探测；按仓库标志文件选择项目已有的测试入口。
         try {
             Path packageJson = root.resolve("package.json");
             if (Files.isRegularFile(packageJson)) {
@@ -128,6 +145,7 @@ public class ReviewTestRunner {
         }
     }
 
+    // 对比测试前后的 git status 行，任何新增行都视为测试留下的工作区副作用。
     private List<String> newSideEffects(List<String> before, List<String> after) {
         if (after == null || after.isEmpty()) {
             return List.of();
@@ -147,6 +165,7 @@ public class ReviewTestRunner {
         String value = (stdout == null ? "" : stdout)
                 + (stderr == null || stderr.isBlank() ? "" : "\n[stderr]\n" + stderr);
         value = value.trim();
+        // 失败定位信息通常在输出末尾，保留尾部而非头部。
         if (value.length() > 2000) {
             value = value.substring(value.length() - 2000);
         }
@@ -157,6 +176,10 @@ public class ReviewTestRunner {
         return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
     }
 
+    /**
+     * 一次平台测试的证据快照。{@code exitCode} 在超时或未能启动时为 null；
+     * {@code sideEffects} 是测试后新增的 git status 行，非空即判定审核失败。
+     */
     public record Evidence(
             String command,
             Integer exitCode,

@@ -6,10 +6,9 @@ TaskNest 是一个**本地运行的软件开发 Agent 工作台**。它先通过
 分析仓库、生成并确认 Markdown 计划表，再在 Git 临时分支上逐个实现直属子任务；思考增量、
 提示词拼装、工具调用、审核结论、Git 检查点、抉择通知和事件账本都会完整展示。
 
-当前处于 **P3 软件开发 Agent 平台阶段**：默认使用真实 OpenAI 兼容模型，由主 Agent
+当前处于 **P3 软件开发 Agent 平台阶段**：使用真实 OpenAI 兼容模型，由主 Agent
 规划与动态重排、子 Agent 使用受控文件 / 本地 Shell 工具实现、可选独立审核 Agent
-自行执行测试。所有子任务使用独立临时分支，成功合并、退回或失败时删除分支。Mock
-脚本链路保留，可用于演练异常事件流。
+自行执行测试。所有子任务使用独立临时分支，成功合并、退回或失败时删除分支。
 
 实时运行与规划会话状态保存在内存中；主任务、计划表、工作目录、子任务、提示词、中间
 结果、事件原文、规划会话、审核结论与 Agent / LLM 设置会同步写入 MySQL，可在左侧主任务
@@ -29,7 +28,6 @@ TaskNest 是一个**本地运行的软件开发 Agent 工作台**。它先通过
 - **动态重排**：主 Agent 可在子任务边界调整未开始的 `PENDING` 任务，计划版本递增。
 - **完整可观测**：17 种 SSE 事件、事件账本、提示词版本、工具调用配对、审核面板、
   Git 时间线与历史档案只读回放。
-- **Mock 演练**：四个脚本覆盖成功、抉择、失败重试、抖动 / 重复 / 乱序 / 丢投递。
 - **本地设置**：LLM 连接与审核策略写入 MySQL，启动自动加载，保存后立即生效。
 
 ## 技术栈
@@ -107,7 +105,7 @@ VITE_API_BASE=http://127.0.0.1:8080
 
 1. 在顶栏“设置 → LLM 连接”填写 Base URL、模型名称与 API Key；保存后立即生效。
 2. 在“Agent 审核”页签决定是否启用独立审核，并设置最大返工次数。
-3. 左侧点击“新建主任务”，选择 Git 仓库根目录，填写目标；可选用 Mock 演练脚本。
+3. 左侧点击“新建主任务”，选择 Git 仓库根目录并填写目标。
 4. 等待规划 Agent 生成计划；如有提问，在选项或自由输入框中回答，也可用提示词修订计划。
 5. 确认计划后创建主任务并开始执行。
 6. 子任务完成、失败、等待抉择或审核退回时会弹出通知；可点击通知定位到对应子任务。
@@ -204,23 +202,14 @@ SSE 规划会话：读取仓库 → 拆分两层计划 → 提问 / 修订
   `GIT_MERGE_CONFLICT` 终止运行，不自动删除可恢复内容。
 - 只允许本地 Git 操作；不执行 `fetch` / `pull` / `push` / `remote` / 强制推送。
 
-## 执行模式与演练脚本
+## 执行流程
 
-创建面板默认使用**真实 Agent**：主 Agent 读取仓库并生成计划，子 Agent 使用目录 / 查找 /
+创建面板只走**真实 Agent**：主 Agent 读取仓库并生成计划，子 Agent 使用目录 / 查找 /
 读取 / 创建 / 写入 / 本地 Shell / `ask_user` 工具实现任务。任一 Agent 遇到模糊选择时，
 通过 `waiting_input` 推送选项与自由输入框。
 
-也可以选择 Mock 脚本演练异常事件流：
-
-| 脚本 | 覆盖场景 |
-| --- | --- |
-| `happy-path` | 两层结构（1 主任务 + 5 直属子任务），全部成功 |
-| `with-ambiguity` | 中途 `waiting_input`，提交选择后继续不同分支 |
-| `with-failure` | `task_failed(retryable=true)`，重试后成功 |
-| `with-noise` | 延迟抖动、重复 `eventId`、调度乱序、丢弃投递 |
-
-两种模式都先生成计划表，确认后才开始运行。任务层级固定为两层：plan 中唯一没有
-`parentTaskId` 的任务是主任务，其余任务必须直接挂在它下面；更深的层级会让脚本加载失败。
+计划必须先经规划会话确认才开始运行。任务层级固定为两层：plan 中唯一没有
+`parentTaskId` 的任务是主任务，其余任务必须直接挂在它下面；出现更深层级时计划被拒绝。
 
 ## 安全边界
 
@@ -245,16 +234,13 @@ REST 统一返回 `{code, message, data}`；SSE 的 `data:` 是完整事件信�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/main-tasks/plan-sessions` | body `{"goal":"目标","workingDir":"仓库内路径","mockScript":"可选"}`，建立 SSE 规划会话 |
+| `POST` | `/api/main-tasks/plan-sessions` | body `{"goal":"目标","workingDir":"仓库根目录"}`，建立 SSE 规划会话 |
 | `GET` | `/api/main-tasks/plan-sessions/{planSessionId}` | 规划会话快照（状态、计划、事件游标） |
 | `GET` | `/api/main-tasks/plan-sessions/{planSessionId}/events?afterSeq=N` | 规划会话 SSE 事件流 |
 | `POST` | `/api/main-tasks/plan-sessions/{planSessionId}/inputs` | 提交规划阶段抉择 `{taskId, selectedOptionId?, customInput?}` |
 | `POST` | `/api/main-tasks/plan-sessions/{planSessionId}/revisions` | 用 `instruction` 修订规划草案 |
 | `POST` | `/api/main-tasks/plan-sessions/{planSessionId}/confirm` | 校验 Git 前置条件并确认计划，创建主任务、启动运行 |
 | `POST` | `/api/main-tasks/plan-sessions/{planSessionId}/cancel` | 取消规划会话，释放仓库锁，不创建主任务 |
-| `POST` | `/api/main-tasks/plan-drafts` | 兼容入口：生成确定性计划草案 |
-| `POST` | `/api/main-tasks/plan-drafts/revise` | 兼容入口：用 `instruction` 修订草案 |
-| `POST` | `/api/main-tasks` | 兼容入口：直接创建主任务并启动运行 |
 | `GET` | `/api/main-tasks?limit=50` | 主任务列表（状态、计划版本、工作目录、子任务完成数） |
 | `GET` | `/api/main-tasks/{mainTaskId}` | 持久化详情：主任务、计划表、子任务、提示词、中间结果、事件原文 |
 | `POST` | `/api/main-tasks/{mainTaskId}/plan/revisions` | 修订已保存计划；运行结束后返回 `40904 PLAN_READ_ONLY` |
@@ -263,7 +249,6 @@ REST 统一返回 `{code, message, data}`；SSE 的 `data:` 是完整事件信�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/api/runs` | 兼容入口，body `{"mockScript":"happy-path"}`，等同于创建主任务 |
 | `GET` | `/api/runs/{runId}` | 实时快照：`run + mainTask + subtasks + events` |
 | `GET` | `/api/runs/{runId}/events?afterSeq=N` | 运行 SSE，先补发 `seq > N` 的历史事件 |
 | `POST` | `/api/runs/{runId}/inputs` | 提交运行抉择 `{taskId, selectedOptionId?, customInput?}` |
@@ -281,12 +266,20 @@ REST 统一返回 `{code, message, data}`；SSE 的 `data:` 是完整事件信�
 ### 命令行示例
 
 ```bash
-# 兼容入口：用 Mock 脚本创建任务
-RESPONSE=$(curl -s -X POST http://127.0.0.1:8080/api/main-tasks \
+# 1. 建立规划会话（需先在“设置 → LLM 连接”配置模型）
+SESSION=$(curl -s -X POST http://127.0.0.1:8080/api/main-tasks/plan-sessions \
   -H 'Content-Type: application/json' \
-  -d '{"mockScript":"happy-path","goal":"生成一份竞品分析"}')
-MAIN_TASK_ID=$(echo "$RESPONSE" | sed -E 's/.*"mainTaskId":"([^"]+)".*/\1/')
-RUN_ID=$(echo "$RESPONSE" | sed -E 's/.*"runId":"([^"]+)".*/\1/')
+  -d '{"goal":"为订单服务补一份接口文档","workingDir":"E:/workspace/demo"}')
+PLAN_SESSION_ID=$(echo "$SESSION" | sed -E 's/.*"planSessionId":"([^"]+)".*/\1/')
+
+# 2. 观察规划 SSE，等待计划就绪
+curl -N "http://127.0.0.1:8080/api/main-tasks/plan-sessions/${PLAN_SESSION_ID}/events?afterSeq=0"
+
+# 3. 确认计划，创建主任务并启动运行
+CONFIRM=$(curl -s -X POST \
+  "http://127.0.0.1:8080/api/main-tasks/plan-sessions/${PLAN_SESSION_ID}/confirm")
+MAIN_TASK_ID=$(echo "$CONFIRM" | sed -E 's/.*"mainTaskId":"([^"]+)".*/\1/')
+RUN_ID=$(echo "$CONFIRM" | sed -E 's/.*"runId":"([^"]+)".*/\1/')
 
 curl -N "http://127.0.0.1:8080/api/runs/${RUN_ID}/events?afterSeq=0"
 curl -s "http://127.0.0.1:8080/api/main-tasks/${MAIN_TASK_ID}"
@@ -320,8 +313,8 @@ curl -s "http://127.0.0.1:8080/api/main-tasks/${MAIN_TASK_ID}"
 
 | 表 | 内容 |
 | --- | --- |
-| `tn_main_task` | 主任务标题、目标、脚本、状态、摘要、等待抉择、时间 |
-| `tn_main_task_plan` | 计划标题、目标、脚本、版本、Markdown、行数据、修订记录；与主任务一对一 |
+| `tn_main_task` | 主任务标题、目标、状态、摘要、等待抉择、时间 |
+| `tn_main_task_plan` | 计划标题、目标、版本、Markdown、行数据、修订记录；与主任务一对一 |
 | `tn_main_task_workspace` | 主任务工作目录的绝对路径；与主任务一对一 |
 | `tn_subtask` | 直属子任务、排序、依赖、状态、摘要、等待抉择、时间 |
 | `tn_prompt` | 每次 `prompt_assembled` 的系统 / 用户 / 上下文 / 最终提示词 |
@@ -329,7 +322,7 @@ curl -s "http://127.0.0.1:8080/api/main-tasks/${MAIN_TASK_ID}"
 | `tn_event` | 每条运行事件的原始 JSON，供档案账本回放 |
 | `tn_llm_setting` | 单例 LLM 设置：Base URL、API Key 类型（LITERAL / ENV）与值 |
 | `tn_llm_setting_model` | 单例模型名称；与 `tn_llm_setting` 配套 |
-| `tn_plan_session` | 规划会话：工作目录、脚本、状态、计划与确认结果 |
+| `tn_plan_session` | 规划会话：工作目录、状态、计划与确认结果 |
 | `tn_plan_session_event` | 规划会话事件原文，供刷新 / 重连补发 |
 | `tn_agent_setting` | 单例审核设置：是否启用审核、最大返工次数 |
 | `tn_task_review` | 每次审核的 verdict、问题、测试证据与耗时 |
@@ -351,7 +344,7 @@ task-nest/
     src/main/java/com/tasknest/
       api/            REST 控制器与 DTO
       event/          事件契约（record / sealed / enum）
-      orchestrator/   CodingTaskOrchestrator（@Primary）、MockTaskOrchestrator、
+      orchestrator/   CodingTaskOrchestrator、
                       planning/ 规划会话、agent/ 主 / 子 / 审核 Agent 与工具循环、
                       review/ 平台测试与审核、tool/ 沙箱与命令策略、GitService
       sse/            SseEmitter、心跳、历史补发、连接管理、规划 SSE
@@ -360,7 +353,6 @@ task-nest/
       service/        RunService、PlanDraftService、DirectoryBrowserService、
                       LlmSettingsService、AgentSettingsService
     src/main/resources/
-      mock/           四个 Mock 事件脚本
       schema.sql      MySQL / H2 共用的建表脚本（表前缀 tn_）
       db/migration/   既有库迁移脚本（表 / 字段注释）
   frontend/src/
@@ -372,7 +364,7 @@ task-nest/
                       Markdown 渲染、目录选择
     views/            正式工作台主视图（目录 + 工作区）
     styles/           Element Plus 主题与 Markdown 排版覆盖
-    ui/               中文文案、双状态标签、脚本选项、目录条目、时间格式化
+    ui/               中文文案、双状态标签、目录条目、时间格式化
   docs/               事件契约、需求文档与 P3 设计
 ```
 

@@ -4,12 +4,20 @@ import com.tasknest.event.EventPayload;
 
 import java.util.List;
 
-/** Agent 提示词模板。所有提示词只包含任务上下文，不含任何密钥或环境变量值。 */
+/**
+ * Agent 提示词模板。所有提示词只包含任务上下文，不含任何密钥或环境变量值。
+ *
+ * <p>纯静态工厂，供规划、子任务执行、审核、汇总与重排使用。提示词约束与
+ * {@link PlanParser}、审核结果解析及工具策略互为补充：模型越界时仍由平台校验兜底，
+ * 因此这里不重复实现安全判断。{@link #platform()} 暴露操作系统、架构与 Shell 类型，
+ * 帮助模型选择正确的命令语法。
+ */
 public final class PromptFactory {
 
     private PromptFactory() {
     }
 
+    /** 规划 Agent 系统提示：只读调查、歧义时 ask_user、最终输出严格两层计划 JSON。 */
     public static String planningSystem() {
         return """
                 你是 TaskNest 的规划 Agent，负责把用户的软件开发目标拆成可直接执行的计划。
@@ -52,6 +60,7 @@ public final class PromptFactory {
                 """;
     }
 
+    /** 组装规划用户提示：工作目录、目标、当前计划（修订时）与修订要求。 */
     public static String planningUser(String goal,
                                       String workingDir,
                                       String currentPlanJson,
@@ -74,6 +83,10 @@ public final class PromptFactory {
         return builder.toString();
     }
 
+    /**
+     * 子任务执行系统提示：声明沙箱边界、可写工具用法、禁止 Git 写操作，
+     * 并要求歧义或破坏性操作前调用 ask_user、结束时给出验证与遗留风险摘要。
+     */
     public static String subtaskSystem(String workingDir,
                                        String goal,
                                        String rootTitle,
@@ -113,6 +126,7 @@ public final class PromptFactory {
         return builder.toString();
     }
 
+    /** 子任务首轮用户提示；重试时附带上次摘要与必须逐条处理的审核退回意见。 */
     public static String subtaskUser(String previousAttemptSummary,
                                      String reviewFeedback) {
         StringBuilder builder = new StringBuilder();
@@ -126,6 +140,10 @@ public final class PromptFactory {
         return builder.toString();
     }
 
+    /**
+     * 审核系统提示：规定先看验收标准、亲自执行受限测试、检查 git 副作用，
+     * 并输出固定结构的严格 JSON；平台最终按测试证据强制执行 REWORK。
+     */
     public static String reviewSystem(String workingDir) {
         return """
                 你是 TaskNest 的独立审核 Agent。你只能读取文件、执行受限的测试/构建命令，
@@ -160,6 +178,7 @@ public final class PromptFactory {
                 工作目录：""" + workingDir + "\n平台：" + platform() + "\n";
     }
 
+    /** 组装审核用户提示：验收标准、子任务摘要、变更文件 / diff 与上轮问题清单。 */
     public static String reviewUser(String goal,
                                     EventPayload.PlannedTask task,
                                     String subtaskSummary,
@@ -196,6 +215,7 @@ public final class PromptFactory {
         return builder.toString();
     }
 
+    /** 最终汇总系统提示：中文叙述、不输出 JSON、不编造未执行的测试。 */
     public static String summarySystem() {
         return """
                 你是 TaskNest 的主 Agent。所有子任务已完成并合并。请根据计划、子任务摘要与
@@ -204,6 +224,7 @@ public final class PromptFactory {
                 """;
     }
 
+    /** 汇总用户提示：最终计划与平台收集的执行事实。 */
     public static String summaryUser(String goal,
                                      EventPayload.Plan plan,
                                      String facts) {
@@ -221,6 +242,10 @@ public final class PromptFactory {
         return builder.toString();
     }
 
+    /**
+     * 重排系统提示：只允许新增、修改或删除 PENDING 任务，输出 continue 或 replan 严格 JSON，
+     * 并明确不要为重排而重排。
+     */
     public static String replanSystem() {
         return """
                 你是 TaskNest 的主 Agent，正在两个子任务之间的重排窗口评估计划。
@@ -239,6 +264,7 @@ public final class PromptFactory {
                 """;
     }
 
+    /** 重排用户提示：当前计划、刚完成子任务结果与尚未开始的任务清单。 */
     public static String replanUser(String goal,
                                     EventPayload.Plan currentPlan,
                                     String lastResult,
@@ -265,6 +291,7 @@ public final class PromptFactory {
         return builder.toString();
     }
 
+    /** 返回操作系统 / 架构与 Shell 类型（cmd.exe 或 /bin/sh），写入提示词。 */
     public static String platform() {
         return System.getProperty("os.name", "unknown") + " / "
                 + System.getProperty("os.arch", "unknown")

@@ -6,7 +6,11 @@ import com.baomidou.mybatisplus.annotation.TableName;
 
 import java.time.LocalDateTime;
 
-/** 审核 Agent 全局设置。单例表，固定 id = 1。 */
+/**
+ * {@code tn_agent_setting} 审核 Agent 全局设置实体，单例表固定 {@code id = 1}。
+ * <p>由 {@code AgentSettingsService} 启动加载、保存后热更新；{@code review_enabled}
+ * 控制独立审核阶段，{@code review_max_reworks} 限制 0–5 次返工。</p>
+ */
 @TableName("tn_agent_setting")
 public class AgentSettingEntity {
 

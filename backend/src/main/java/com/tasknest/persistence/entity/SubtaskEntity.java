@@ -6,6 +6,12 @@ import com.baomidou.mybatisplus.annotation.TableName;
 
 import java.time.LocalDateTime;
 
+/**
+ * {@code tn_subtask} 直属子任务档案实体，只保存两层任务模型中的子任务。
+ * <p>{@code RunPersistenceService} 依据 {@code plan} 与 {@code task_*} 事件创建并更新；
+ * {@code status} 使用 {@link com.tasknest.store.SubtaskStatus} 枚举名，{@code depends_on}
+ * 与 {@code waiting_options} 为 JSON 文本，{@code (main_task_id, task_id)} 唯一。</p>
+ */
 @TableName("tn_subtask")
 public class SubtaskEntity {
 

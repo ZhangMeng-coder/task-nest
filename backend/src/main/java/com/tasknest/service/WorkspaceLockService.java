@@ -18,6 +18,12 @@ public class WorkspaceLockService {
 
     private final Map<String, String> owners = new ConcurrentHashMap<>();
 
+    /**
+     * 获取仓库锁。同一持有者重复获取视为成功（可重入）；其他持有者已占用时
+     * 抛出 {@link ErrorCode#WORKSPACE_BUSY}。
+     *
+     * @return 规范化后的仓库锁 key，可用于按 key 释放
+     */
     public String acquire(Path root, String owner) {
         String key = key(root);
         String existing = owners.putIfAbsent(key, owner);
@@ -28,21 +34,34 @@ public class WorkspaceLockService {
         return key;
     }
 
+    /**
+     * 按仓库路径释放锁。只有持有者匹配时才真正释放，避免误释放他人的锁。
+     */
     public void release(Path root, String owner) {
         String key = key(root);
         owners.computeIfPresent(key, (ignored, current) ->
                 current.equals(owner) ? null : current);
     }
 
+    /**
+     * 按已规范化的锁 key 释放；持有者不匹配时保持原锁不变。
+     */
     public void release(String key, String owner) {
         owners.computeIfPresent(key, (ignored, current) ->
                 current.equals(owner) ? null : current);
     }
 
+    /**
+     * 判断仓库当前是否被任意持有者占用。
+     */
     public boolean isLocked(Path root) {
         return owners.containsKey(key(root));
     }
 
+    /**
+     * 优先使用真实路径作为 key，保证符号链接与相对路径指向同一仓库；
+     * 无法解析时退回绝对规范化路径。
+     */
     private String key(Path root) {
         try {
             return root.toRealPath().toString();

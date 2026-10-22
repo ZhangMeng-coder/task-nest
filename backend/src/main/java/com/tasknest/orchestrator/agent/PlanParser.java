@@ -19,6 +19,11 @@ import java.util.Set;
 /**
  * 解析规划 Agent 的最终 JSON，并校验两层结构、ID 唯一与依赖无环。
  * 结构违规统一抛出 PLAN_INVALID_OUTPUT，交由规划会话转换为 PLAN_AGENT_FAILED。
+ *
+ * <p>无状态解析器，规划阶段与执行期重排共用。校验范围包括：唯一根任务、
+ * 至少一个直属子任务、子任务 ID 唯一且不得占用根 ID、allowedTools 必须属于执行工具集合、
+ * parentTaskId 只能是根任务、dependsOn 只能指向已知（或显式允许的外部）任务且不能成环。
+ * 缺失 taskId 时会生成占位 ID，但不会因此放宽其余约束。
  */
 public final class PlanParser {
 
@@ -27,13 +32,23 @@ public final class PlanParser {
     private PlanParser() {
     }
 
+    /**
+     * 解析并严格校验计划，不引用计划外任务。
+     *
+     * @throws AgentException PLAN_INVALID_OUTPUT，内容为空、不是 JSON 或结构不合法时
+     */
     public static PlanDraft parse(String content, String goal, ObjectMapper objectMapper) {
         return parse(content, goal, objectMapper, Set.of());
     }
 
     /**
+     * 解析并严格校验计划，允许依赖指定的既有任务。
+     *
+     * <p>依赖会被归一化为规范任务 ID；重复依赖去重，指向根任务的依赖直接忽略。
+     *
      * @param externalTaskIds 允许被依赖、但不出现在本次 JSON 中的既有任务 ID，
      *                        用于执行期重排时引用已开始或已完成的任务。
+     * @throws AgentException PLAN_INVALID_OUTPUT，内容为空、不是 JSON 或结构不合法时
      */
     public static PlanDraft parse(String content, String goal, ObjectMapper objectMapper,
                                   Set<String> externalTaskIds) {
@@ -71,6 +86,7 @@ public final class PlanParser {
             throw invalid("计划至少需要一个子任务");
         }
 
+        // 记录原始 ID 到规范 ID 的映射，供 dependsOn 归一化；根任务一律改写为 plan_root。
         Map<String, String> idMap = new HashMap<>();
         if (providedRootId != null && !providedRootId.isBlank()
                 && !ROOT_ID.equals(providedRootId)) {
@@ -182,6 +198,7 @@ public final class PlanParser {
             throw invalid("规划结果为空");
         }
         String value = content.trim();
+        // 容错模型偶尔包裹的 Markdown 代码块，随后只提取最外层 JSON 对象。
         int fence = value.indexOf("```");
         if (fence >= 0) {
             int start = value.indexOf('\n', fence);
@@ -216,6 +233,7 @@ public final class PlanParser {
                         .add(entry.getKey());
             }
         }
+        // Kahn 拓扑排序：从入度为 0 的节点剥离，若最终访问数少于节点数则存在环。
         Deque<String> queue = new ArrayDeque<>();
         indegree.forEach((id, count) -> {
             if (count == 0) {

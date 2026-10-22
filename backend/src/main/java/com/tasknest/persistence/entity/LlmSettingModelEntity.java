@@ -7,8 +7,9 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
 
 /**
- * LLM 模型名称。单例表，固定 id = 1；作为 tn_llm_setting 的配套表，
- * 让已有数据库无需对旧表做 ALTER TABLE。
+ * {@code tn_llm_setting_model} LLM 模型名称实体，单例表固定 {@code id = 1}。
+ * <p>作为 {@code tn_llm_setting} 的配套表，由 {@code LlmSettingsService} 与连接设置一并
+ * 读写，默认模型为 {@code gpt-4o}；单独建表让既有数据库无需对旧表补列。</p>
  */
 @TableName("tn_llm_setting_model")
 public class LlmSettingModelEntity {

@@ -43,10 +43,3 @@ tasknest:
   sse:
     timeout-ms: 3600000
     heartbeat-ms: 15000
-  mock:
-    scripts:
-      - happy-path
-      - with-ambiguity
-      - with-failure
-      - with-noise
-    delay-scale: 1.0

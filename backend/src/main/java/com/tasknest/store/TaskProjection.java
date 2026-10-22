@@ -15,10 +15,18 @@ import java.util.Objects;
  *
  * <p>层级被固定为两层：plan 中唯一的根节点是主任务，其余节点必须直接挂在根节点下，
  * 作为子任务。主任务使用 {@link MainTaskStatus}，子任务使用 {@link SubtaskStatus}。
+ * 投影在运行锁内由 {@code EventPublisher} 调用，改动的是内存状态；事件原文另行落库。</p>
+ *
+ * <p>终止事件会补全主任务终态，并把仍未结束的子任务统一修复为 {@code FAILED}，
+ * 保证快照不会留下运行结束后仍处于进行中的节点。终态节点不会被后续事件覆盖。</p>
  */
 @Component
 public class TaskProjection {
 
+    /**
+     * 按事件类型推进运行状态。未知或纯传输事件（心跳）不改变状态；
+     * 分支内部会忽略已终止节点的重复写入，保证投影幂等。
+     */
     public void apply(RunState run, EventEnvelope event) {
         switch (event.type()) {
             case RUN_STARTED -> run.getMainTask().setGoal(((EventPayload.RunStarted) event.payload()).goal());
@@ -65,6 +73,14 @@ public class TaskProjection {
         }
     }
 
+    /**
+     * 应用计划（首次或动态重排）。校验唯一的根节点、两层结构与任务 ID 唯一性；
+     * 已有节点保持状态，只有仍为 {@code PENDING} 的节点接受标题 / 依赖更新，
+     * 被移除的 {@code PENDING} 节点转为 {@code CANCELLED}。
+     *
+     * @throws IllegalStateException 计划缺少根、出现多层 / 重复 ID 时抛出；
+     *                               异常会向外传播，该事件不会继续持久化或推送
+     */
     private void applyPlan(RunState run, EventPayload.Plan plan) {
         TaskRef root = null;
         for (EventPayload.PlannedTask planned : plan.tasks()) {
@@ -153,6 +169,10 @@ public class TaskProjection {
         }
     }
 
+    /**
+     * 审核完成只处理 {@code REWORK}：把子任务置为 {@code RETRYING}。
+     * {@code PASS} 不在此处收尾，由后续 {@code task_completed} 置为成功。
+     */
     private void applyReviewCompleted(RunState run, EventEnvelope event) {
         TaskRef ref = ensureTask(run, event.task());
         if (ref == null || isMain(run, ref)) {
@@ -257,6 +277,11 @@ public class TaskProjection {
         }
     }
 
+    /**
+     * 子任务失败：{@code retryable=true} 置为 {@code RETRYING} 且不写完成时间，
+     * 表示后续还会重试；只有不可重试失败才进入终态 {@code FAILED}。
+     * 主任务失败没有重试语义，直接置为 {@code FAILED}。
+     */
     private void applyTaskFailed(RunState run, EventEnvelope event) {
         TaskRef ref = ensureTask(run, event.task());
         if (ref == null) {
@@ -282,6 +307,11 @@ public class TaskProjection {
         }
     }
 
+    /**
+     * 确保事件引用的任务在投影中存在：根任务补齐主任务字段；子任务缺失时创建
+     * 占位节点（使用大排序号）。根任务尚未由 plan 建立时返回 {@code null}，
+     * 调用方应忽略该事件，避免凭空制造更深层级。
+     */
     private TaskRef ensureTask(RunState run, TaskRef ref) {
         if (ref == null) {
             return null;
@@ -320,6 +350,9 @@ public class TaskProjection {
         return ref != null && Objects.equals(ref.taskId(), run.getMainTask().getRootTaskId());
     }
 
+    /**
+     * 运行终止后的兜底修复：把仍未结束的子任务标记为失败，已有错误信息保留。
+     */
     private void repairSubtasks(RunState run, String message) {
         for (TaskNodeState node : run.getSubtasks().values()) {
             if (!node.isTerminal()) {

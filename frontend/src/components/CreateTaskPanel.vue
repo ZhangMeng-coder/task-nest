@@ -15,7 +15,6 @@ import type { TaskNestEvent } from '@/api/events'
 import {
   EVENT_TYPE_LABEL,
   PLAN_SESSION_STATUS_LABEL,
-  SCRIPT_OPTIONS,
 } from '@/ui/labels'
 import DirectoryPickerDialog from './DirectoryPickerDialog.vue'
 
@@ -25,7 +24,6 @@ const emit = defineEmits<{
 
 const store = useTaskTreeStore()
 
-const script = ref('')
 const goal = ref('')
 const workingDir = ref('')
 const pickerOpen = ref(false)
@@ -117,7 +115,7 @@ async function beginPlanning(): Promise<void> {
     ElMessage.warning('规划与执行都需要一个 Git 仓库根目录作为工作目录。')
     return
   }
-  await store.startPlanning(goalText, workingDir.value.trim(), script.value || null)
+  await store.startPlanning(goalText, workingDir.value.trim())
 }
 
 async function applyRevision(): Promise<void> {
@@ -201,24 +199,6 @@ function restartPlanning(): void {
     <div v-if="!store.planSessionId" class="create-form">
       <div class="field-row">
         <div class="field-block">
-          <span class="field-label mono">PLANNER</span>
-          <el-select v-model="script" :disabled="store.planningStarting" class="field-select">
-            <el-option label="真实规划 Agent（使用 LLM 设置）" value="" />
-            <el-option
-              v-for="option in SCRIPT_OPTIONS"
-              :key="option.id"
-              :label="`Mock · ${option.name}`"
-              :value="option.id"
-            />
-          </el-select>
-          <span class="field-hint">
-            {{ script
-              ? SCRIPT_OPTIONS.find((option) => option.id === script)?.summary
-              : '主 Agent 会通过 function call 读取目录与文件，必要时向你提问。' }}
-          </span>
-        </div>
-
-        <div class="field-block field-block-wide">
           <span class="field-label mono">GIT WORKSPACE</span>
           <div class="workdir-picker">
             <el-input
@@ -563,7 +543,7 @@ function restartPlanning(): void {
 
 .field-row {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   margin-bottom: 14px;
 }
@@ -582,10 +562,6 @@ function restartPlanning(): void {
   color: var(--ink-faint);
   font-size: 9px;
   letter-spacing: 0.1em;
-}
-
-.field-select {
-  width: 100%;
 }
 
 .field-hint {

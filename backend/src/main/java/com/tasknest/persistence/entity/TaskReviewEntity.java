@@ -6,7 +6,12 @@ import com.baomidou.mybatisplus.annotation.TableName;
 
 import java.time.LocalDateTime;
 
-/** 每次审核一份记录；issues 与 testEvidence 以 JSON 保存。 */
+/**
+ * {@code tn_task_review} 每次子任务审核一份记录。
+ * <p>{@code RunPersistenceService#saveReview} 在 {@code review_completed} 且任务为直属
+ * 子任务时写入；{@code verdict} 为 PASS/REWORK，{@code issues} 与 {@code test_evidence}
+ * 以 LONGTEXT JSON 保存。</p>
+ */
 @TableName("tn_task_review")
 public class TaskReviewEntity {
 

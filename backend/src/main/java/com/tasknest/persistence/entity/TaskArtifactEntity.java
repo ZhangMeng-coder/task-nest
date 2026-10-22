@@ -7,8 +7,10 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
 
 /**
- * 中间结果：思考增量、工具调用参数、工具返回结果。
- * 提示词单独落在 tn_prompt，便于按字段查询。
+ * {@code tn_task_artifact} 任务中间结果，按事件序号保存思考和工具证据。
+ * <p>{@code RunPersistenceService} 将 {@code task_thought} 记为 THOUGHT，
+ * {@code tool_call}/{@code tool_result} 记为工具调用与结果；{@code content} 为 JSON/LONGTEXT，
+ * 工具结果优先回填未完成的调用行。提示词单独落在 {@code tn_prompt}，便于按字段查询。</p>
  */
 @TableName("tn_task_artifact")
 public class TaskArtifactEntity {

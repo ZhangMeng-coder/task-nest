@@ -6,8 +6,8 @@
 
 当前阶段：
 - 规划会话（创建主任务前）与执行运行（确认后）各有一条 SSE 流，事件信封一致。
-- `MockTaskOrchestrator` 仍用于演示脚本；真实模式由 `CodingTaskOrchestrator` 调用
-  OpenAI 兼容模型与本地工具。两者的 SSE、REST 与前端类型完全一致。
+- 两个阶段都由 `CodingTaskOrchestrator` 调用 OpenAI 兼容模型与本地工具完成，
+  SSE、REST 与前端类型完全一致。
 
 ---
 
@@ -57,7 +57,7 @@ data: {"eventId":"evt_000123","runId":"run_...","seq":123,...}
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `eventId` | string | 默认 `evt_` + 6 位 seq；脚本可覆盖，用于重复 ID 演练。前端按它去重。 |
+| `eventId` | string | 默认 `evt_` + 6 位 seq。前端按它去重。 |
 | `runId` | string | 运行 ID。 |
 | `seq` | number | 单次运行内严格递增，从 1 开始；包括心跳。重连续传游标。 |
 | `type` | string | 17 种事件类型之一，见第 3 节。 |
@@ -142,7 +142,6 @@ data: {"eventId":"evt_000123","runId":"run_...","seq":123,...}
 - `revision` 从 1 开始；`reason` / `changedTaskIds` 只在动态重排时携带。动态重排只
   新增任务、修改或取消 `PENDING` 任务；被取消的任务不再出现在新计划中，子任务状态为
   `CANCELLED`。
-- Mock 脚本的 `plan` 事件可以只提供 `taskId/parentTaskId/title/agentName/dependsOn`。
 
 ### 3.2 `prompt_assembled`
 
@@ -180,7 +179,7 @@ data: {"eventId":"evt_000123","runId":"run_...","seq":123,...}
 
 - `options` 可以为空，但 `allowCustom` 必须为 `true`；最多 8 个选项。
 - `id` 在单个事件内唯一，是提交抉择时 `selectedOptionId` 的取值。
-- `allowCustom` 缺省表示不允许自由输入（兼容 Mock）；P3 的 `ask_user` 默认允许。
+- `allowCustom` 缺省为 `true`；真实 `ask_user` 默认允许自由输入。
 - 提交 `customInput` 时 `selectedOptionId` 可以为 `null`；两者至少有一个非空。
 - 规划会话与执行运行都可能发送该事件；`task` 指向提问的规划根任务或子任务。
 
@@ -267,7 +266,7 @@ data: {"eventId":"evt_000123","runId":"run_...","seq":123,...}
 4. 连接建立后立即推送一个 heartbeat，之后约每 15s 一次。
 5. 运行已终止时，补发/发送最后一个终止事件后关闭连接；前端**不要重连**已终止的运行。
 
-同一条连接内按 `seq` 递增发送；噪声脚本的 `dispatchDelayMs` 只影响投递时机，不改变 `seq`。
+同一条连接内按 `seq` 递增发送（心跳也占用 seq）。
 
 ### 4.3 去重与缺口
 
@@ -294,32 +293,14 @@ data: {"eventId":"evt_000123","runId":"run_...","seq":123,...}
 
 失败时 `code != 0`，HTTP 状态码与 `code` 共同表达错误。
 
-### 5.1 创建主任务
+### 5.1 主任务档案
 
-`POST /api/main-tasks` → `201`
-
-```json
-{ "mockScript": "happy-path", "goal": "可选目标" }
-```
-
-`data`：
-
-```json
-{
-  "mainTaskId": "mt_20261021_072240_4983cb",
-  "runId": "run_20261021_072240_4983cb",
-  "mockScript": "happy-path",
-  "status": "PENDING",
-  "createdAt": "2026-10-21T07:22:40.615Z"
-}
-```
-
-`POST /api/runs` 保留为兼容入口，响应额外带 `mainTaskId`。`goal` 可选，最多 2000 字。
-`mockScript` 允许值由 `application.yml` 的 `tasknest.mock.scripts` 决定，默认：
-`happy-path`、`with-ambiguity`、`with-failure`、`with-noise`。
+主任务只能由规划会话确认后创建，没有独立的创建端点。
 
 `GET /api/main-tasks?limit=50` 返回持久化主任务列表；`GET /api/main-tasks/{mainTaskId}`
 返回档案详情（主任务、子任务、提示词、中间结果、事件原文），未知 ID 返回 `40403`。
+`POST /api/main-tasks/{mainTaskId}/plan/revisions` 用 `{instruction}` 修订已保存的计划，
+运行结束后返回 `40904 PLAN_READ_ONLY`。
 
 ### 5.1.1 规划会话（P3）
 
@@ -327,7 +308,7 @@ data: {"eventId":"evt_000123","runId":"run_...","seq":123,...}
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/main-tasks/plan-sessions` | 创建会话，body `{goal, workingDir, mockScript?}` |
+| POST | `/api/main-tasks/plan-sessions` | 创建会话，body `{goal, workingDir}` |
 | GET | `/api/main-tasks/plan-sessions/{id}` | 会话状态、计划、最后 seq |
 | GET | `/api/main-tasks/plan-sessions/{id}/events?afterSeq=N` | 规划 SSE |
 | POST | `/api/main-tasks/plan-sessions/{id}/inputs` | 提交抉择 `{taskId, selectedOptionId?, customInput?}` |
@@ -364,7 +345,6 @@ data: {"eventId":"evt_000123","runId":"run_...","seq":123,...}
     "run": {
       "runId": "run_...",
       "mainTaskId": "mt_...",
-      "mockScript": "with-ambiguity",
       "goal": "为 CLI 工具设计离线缓存方案……",
       "status": "RUNNING",
       "createdAt": "2026-10-21T07:22:40.615Z",
@@ -441,7 +421,7 @@ data: {"eventId":"evt_000123","runId":"run_...","seq":123,...}
 }
 ```
 
-后端校验通过后清空等待态、推送 `input_received`，再继续脚本或 Agent 循环。
+后端校验通过后清空等待态、推送 `input_received`，再继续 Agent 循环。
 同一运行同时最多只有一个等待输入的任务。
 
 ### 5.4 SSE 事件流
@@ -458,7 +438,6 @@ data: {"eventId":"evt_000123","runId":"run_...","seq":123,...}
 | 0 | 2xx | 成功 |
 | 40001 | 400 | 参数校验失败 |
 | 40002 | 400 | `afterSeq` 非法（负数或大于 `lastSeq`） |
-| 40003 | 400 | 不支持的 `mockScript` |
 | 40004 | 400 | 工作目录不存在或不可访问 |
 | 40006 | 400 | 抉择提交不合法（选项与自由输入均空） |
 | 40010 | 400 | 本机找不到可执行的 git |
@@ -480,7 +459,6 @@ data: {"eventId":"evt_000123","runId":"run_...","seq":123,...}
 | 40911 | 409 | 运行期间 Git 分支被外部切换 |
 | 40912 | 409 | Git 合并冲突 |
 | 50001 | 500 | 服务内部错误 |
-| 50002 | 500 | 内置 Mock 脚本无效或缺失 |
 | 50010 | 500 | Git 分支创建失败 |
 | 50011 | 500 | Git 提交失败 |
 | 50012 | 500 | Git 回滚失败 |
@@ -497,59 +475,7 @@ Agent / 编排器还会在 `error.payload.code` 中使用以下字符串码（HT
 
 ---
 
-## 6. Mock 脚本
-
-脚本位置：`backend/src/main/resources/mock/{name}.json`。
-
-```json
-{
-  "name": "happy-path",
-  "description": "可选说明",
-  "events": [
-    {
-      "delayMs": 250,
-      "type": "task_thought",
-      "taskId": "t_research",
-      "payload": { "delta": "..." },
-      "eventId": "evt_custom_1",
-      "dispatchDelayMs": 0,
-      "dropDispatch": false
-    }
-  ]
-}
-```
-
-| 字段 | 默认 | 说明 |
-| --- | --- | --- |
-| `delayMs` | 0 | 相对于上一条事件执行完成的等待时间，0–60000。 |
-| `type` | 必填 | 17 种类型之一；脚本不得定义 `input_received` / `heartbeat` / `review_started` / `review_completed` / `git_checkpoint`。 |
-| `taskId` | 任务事件必填 | 必须出现在 `plan` 中；`run_*` / `error` 禁止携带。 |
-| `task` | 自动填充 | 可选；若显式给出，必须与 `plan` 中同 `taskId` 的四个字段一致。 |
-| `payload` | 必填 | 按类型校验。 |
-| `eventId` | 自动 | `evt_[A-Za-z0-9_]{1,64}`；允许重复以演练前端幂等。 |
-| `dispatchDelayMs` | 0 | 仅影响**推送**延迟，0–1000；事件仍按原 `seq` 持久化。用于乱序演练。 |
-| `dropDispatch` | false | 不推送给实时连接，但事件仍持久化。用于缺失/快照恢复演练。 |
-| `branches` | 无 | 仅 `waiting_input` 可定义；键必须与 `options[].id` 一一对应。 |
-
-约束：
-
-- 必须包含且只包含一个 `plan`；`plan` 之前只允许 `run_started`。
-- 最后一个事件必须是 `run_completed` 或 `error`；终止事件之后不得有事件。
-- 终止事件禁止 `dispatchDelayMs` / `dropDispatch`；`waiting_input` 禁止 `dropDispatch`。
-- `branches` 中不得出现 `run_started` / `plan` / 终止事件，但允许嵌套 `waiting_input`。
-
-内置脚本：
-
-| 名称 | 用途 |
-| --- | --- |
-| `happy-path` | 两层结构（1 主 + 5 直属子任务），全成功，含思考、提示词、工具调用。 |
-| `with-ambiguity` | 一个 `waiting_input`、两个选项，选择后进入不同分支，再继续主脚本。 |
-| `with-failure` | 凭据刷新失败 `retryable=true`，重新 `task_started` 后成功，最终全部 SUCCESS。 |
-| `with-noise` | 重复 `eventId`、`dispatchDelayMs` 乱序、`dropDispatch` 丢投。 |
-
----
-
-## 7. 前端类型定义
+## 6. 前端类型定义
 
 TypeScript 类型位于 `frontend/src/api/events.ts`，核心形状：
 
@@ -587,7 +513,7 @@ export interface TaskNestEvent<T extends EventType = EventType> {
 
 ---
 
-## 8. 本阶段边界
+## 7. 本阶段边界
 
 - P3 使用自研的 OpenAI 兼容 `/chat/completions` 客户端（`LlmClient`），不引入
   Spring AI；模型必须支持 function tool calling。
@@ -596,5 +522,5 @@ export interface TaskNestEvent<T extends EventType = EventType> {
 - 实时 `RunState` 与 SSE 游标在内存中；主任务、子任务、计划、提示词、中间结果、
   审核记录和事件原文写入 MySQL（MyBatis-Plus）。进程重启后实时运行失效，但档案仍可打开。
 - 不引入 MQ / Redis / 用户体系 / 鉴权；不做 token / 费用预算。
-- 本文档定义的 SSE、REST 与前端类型是唯一契约；`MockTaskOrchestrator` 与
-  `CodingTaskOrchestrator` 必须产生相同形状的事件。
+- 本文档定义的 SSE、REST 与前端类型是唯一契约；规划会话与执行运行发送的事件
+  必须使用相同形状的信封。

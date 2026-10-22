@@ -6,6 +6,13 @@ import com.baomidou.mybatisplus.annotation.TableName;
 
 import java.time.LocalDateTime;
 
+/**
+ * {@code tn_event} 运行事件原文账本，事件落库后的最终事实来源。
+ * <p>{@code RunPersistenceService#persist} 对已落库主任务的每个事件写入一行；
+ * {@code (run_id, seq)} 唯一，{@code event_json} 为 LONGTEXT 信封原文，
+ * {@code task_id} 对运行级事件为空。
+ * 主任务档案查询按 {@code seq} 升序回放事件内容。</p>
+ */
 @TableName("tn_event")
 public class RunEventEntity {
 

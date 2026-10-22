@@ -2,29 +2,19 @@ package com.tasknest.service;
 
 import com.tasknest.api.dto.AcceptedResponse;
 import com.tasknest.api.dto.ConfirmPlanSessionResponse;
-import com.tasknest.api.dto.CreateMainTaskResponse;
-import com.tasknest.api.dto.CreateRunResponse;
-import com.tasknest.api.dto.PlanDraftInput;
 import com.tasknest.api.dto.PlanDraftView;
 import com.tasknest.api.dto.PlanRowView;
 import com.tasknest.common.BusinessException;
 import com.tasknest.common.ErrorCode;
 import com.tasknest.event.EventPayload;
-import com.tasknest.orchestrator.MockScriptLoader;
 import com.tasknest.orchestrator.RunRequest;
 import com.tasknest.orchestrator.TaskOrchestrator;
 import com.tasknest.orchestrator.agent.PlanDraft;
 import com.tasknest.persistence.RunPersistenceService;
-import com.tasknest.store.MainTaskStatus;
 import com.tasknest.store.RunSnapshot;
-import com.tasknest.store.RunState;
 import com.tasknest.store.RunStore;
 import org.springframework.stereotype.Service;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -32,6 +22,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * 运行创建用例的入口：生成 {@code mainTaskId} / {@code runId}，先落主任务与计划档案，
+ * 再交给 {@link TaskOrchestrator} 启动。
+ *
+ * <p>唯一入口是 {@link PlanningSessionService#confirm(String)} 调用的
+ * {@link #createFromPlan}；计划来自真实规划 Agent 的确认稿。本类不直接操作 Git，
+ * Git 前置校验与仓库锁释放由调用方负责。</p>
+ */
 @Service
 public class RunService {
 
@@ -40,66 +38,17 @@ public class RunService {
 
     private final TaskOrchestrator orchestrator;
     private final RunStore runStore;
-    private final MockScriptLoader scriptLoader;
     private final RunPersistenceService persistence;
     private final PlanDraftService planDraftService;
 
     public RunService(TaskOrchestrator orchestrator,
                       RunStore runStore,
-                      MockScriptLoader scriptLoader,
                       RunPersistenceService persistence,
                       PlanDraftService planDraftService) {
         this.orchestrator = orchestrator;
         this.runStore = runStore;
-        this.scriptLoader = scriptLoader;
         this.persistence = persistence;
         this.planDraftService = planDraftService;
-    }
-
-    public CreateMainTaskResponse createMainTask(String mockScript, String goal) {
-        return createMainTask(mockScript, goal, (String) null, null);
-    }
-
-    public CreateMainTaskResponse createMainTask(String mockScript, String goal, PlanDraftInput planInput) {
-        return createMainTask(mockScript, goal, null, planInput);
-    }
-
-    /**
-     * 创建主任务：先确定计划表（确认稿或按脚本生成的默认稿），再启动 Mock 编排。
-     * 工作目录只作为主任务档案属性保存，Mock 阶段不会访问该目录。
-     */
-    public CreateMainTaskResponse createMainTask(String mockScript,
-                                                 String goal,
-                                                 String workingDir,
-                                                 PlanDraftInput planInput) {
-        if (!scriptLoader.isAllowed(mockScript)) {
-            throw new BusinessException(ErrorCode.INVALID_SCRIPT,
-                    "mockScript 必须是 " + String.join(" / ", scriptLoader.allowedScripts()));
-        }
-        String normalizedWorkingDir = normalizeWorkingDir(workingDir);
-        PlanDraftView plan = planInput == null
-                ? planDraftService.generate(mockScript, goal)
-                : planDraftService.fromInput(mockScript, goal, planInput);
-        String mainTaskId = generateId("mt_");
-        String runId = generateRunId();
-        String title = plan.title();
-        String effectiveGoal = plan.goal();
-
-        persistence.createPending(
-                mainTaskId, runId, title, effectiveGoal, mockScript, normalizedWorkingDir);
-        PlanDraftView savedPlan = planDraftService.save(mainTaskId, plan);
-        try {
-            orchestrator.start(runId, new RunRequest(
-                    mockScript, mainTaskId, title, effectiveGoal, normalizedWorkingDir,
-                    null, null, null, null));
-        } catch (RuntimeException exception) {
-            persistence.markStartFailed(mainTaskId, "编排器启动失败: " + exception.getMessage());
-            throw exception;
-        }
-        RunState run = runStore.require(runId);
-        return new CreateMainTaskResponse(
-                mainTaskId, runId, mockScript, normalizedWorkingDir,
-                MainTaskStatus.PENDING, run.getCreatedAt(), savedPlan);
     }
 
     /**
@@ -107,18 +56,17 @@ public class RunService {
      */
     public ConfirmPlanSessionResponse createFromPlan(PlanDraft draft,
                                                      int revision,
-                                                     String mockScript,
                                                      String workingDir,
                                                      String originalBranch) {
         String mainTaskId = generateId("mt_");
         String runId = generateRunId();
+        // 分支只在此处命名；真正的创建、提交与合并由 CodingTaskOrchestrator 执行。
         String mainTaskBranch = "tasknest/" + mainTaskId;
         List<PlanRowView> rows = rowsOf(draft);
         PlanDraftView plan = planDraftService.fromConfirmed(
-                mockScript, draft.goal(), draft.title(), rows, List.of(), revision);
+                draft.goal(), draft.title(), rows, List.of(), revision);
 
-        persistence.createPending(mainTaskId, runId, plan.title(), draft.goal(),
-                mockScript, workingDir);
+        persistence.createPending(mainTaskId, runId, plan.title(), draft.goal(), workingDir);
         PlanDraftView savedPlan;
         try {
             savedPlan = planDraftService.save(mainTaskId, plan);
@@ -128,7 +76,6 @@ public class RunService {
         }
         try {
             orchestrator.start(runId, new RunRequest(
-                    mockScript,
                     mainTaskId,
                     plan.title(),
                     draft.goal(),
@@ -145,6 +92,10 @@ public class RunService {
                 mainTaskId, runId, workingDir, savedPlan.revision());
     }
 
+    /**
+     * 把规划器产出的子任务转换为计划表行。依赖为空时展示为破折号，
+     * 预期产出取验收标准的第一条，缺省时回退为“可复核结果”。
+     */
     private List<PlanRowView> rowsOf(PlanDraft draft) {
         List<PlanRowView> rows = new ArrayList<>();
         for (EventPayload.PlannedTask task : draft.children()) {
@@ -170,15 +121,8 @@ public class RunService {
     }
 
     /**
-     * 兼容旧的运行创建入口：每次运行仍会生成一个可查询的主任务。
+     * 把用户抉择转交给编排器；校验与唤醒等待队列由编排器完成。
      */
-    public CreateRunResponse createRun(String mockScript) {
-        CreateMainTaskResponse created = createMainTask(mockScript, null);
-        RunState run = runStore.require(created.runId());
-        return new CreateRunResponse(
-                run.getRunId(), run.getMainTaskId(), run.getMockScript(), run.getStatus(), run.getCreatedAt());
-    }
-
     public AcceptedResponse submitInput(String runId,
                                          String taskId,
                                          String selectedOptionId,
@@ -187,35 +131,15 @@ public class RunService {
         return new AcceptedResponse(runId, taskId, selectedOptionId, customInput);
     }
 
+    /**
+     * 读取内存中的运行快照；不查档案表，因此进程重启后不保证可读。
+     */
     public RunSnapshot snapshot(String runId) {
         return runStore.snapshot(runId);
     }
 
-    private String normalizeWorkingDir(String workingDir) {
-        if (workingDir == null || workingDir.isBlank()) {
-            return null;
-        }
-        String trimmed = workingDir.trim();
-        if (trimmed.length() > 1024) {
-            throw new BusinessException(ErrorCode.INVALID_WORKING_DIR, "工作目录路径最多 1024 字");
-        }
-        try {
-            Path path = Path.of(trimmed).toAbsolutePath().normalize();
-            if (!Files.isDirectory(path)) {
-                throw new BusinessException(ErrorCode.INVALID_WORKING_DIR,
-                        "工作目录不存在或不是文件夹: " + trimmed);
-            }
-            return path.toRealPath().toString();
-        } catch (InvalidPathException exception) {
-            throw new BusinessException(ErrorCode.INVALID_WORKING_DIR,
-                    "工作目录路径格式非法: " + trimmed);
-        } catch (IOException | SecurityException exception) {
-            throw new BusinessException(ErrorCode.INVALID_WORKING_DIR,
-                    "工作目录不可访问: " + trimmed);
-        }
-    }
-
     private String generateRunId() {
+        // runId 还要在内存 RunStore 中唯一；时间戳相同则换随机后缀重试。
         for (int attempt = 0; attempt < 10; attempt++) {
             String candidate = "run_" + ID_TIME.format(Instant.now()) + "_" + suffix();
             if (!runStore.contains(candidate)) {
@@ -225,6 +149,9 @@ public class RunService {
         throw new BusinessException(ErrorCode.INTERNAL, "无法生成唯一 runId");
     }
 
+    /**
+     * 生成带 UTC 时间戳与 6 位随机后缀的业务 ID；调用方负责保证语义上的唯一性。
+     */
     private String generateId(String prefix) {
         return prefix + ID_TIME.format(Instant.now()) + "_" + suffix();
     }

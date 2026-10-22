@@ -11,8 +11,12 @@ import com.tasknest.store.UserInput;
  */
 public interface AgentSession {
 
+    /**
+     * 发布一条 Agent 事件。实现决定 runId、持久化与 SSE 推送方式，AgentLoop 不感知存储细节。
+     */
     void publish(EventType type, TaskRef task, EventPayload payload);
 
+    /** 运行 / 规划会话是否已终止；AgentLoop 在每轮开始和每次工具调用前轮询。 */
     boolean cancelled();
 
     /**

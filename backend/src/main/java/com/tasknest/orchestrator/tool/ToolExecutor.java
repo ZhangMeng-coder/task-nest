@@ -31,6 +31,12 @@ import java.util.regex.Pattern;
 /**
  * 执行 P3 工具。所有路径经 {@link WorkspaceSandbox} 校验，所有命令先过策略。
  * 返回值为可直接写入 tool_result.result 的 JSON 友好结构。
+ *
+ * <p>由 {@link com.tasknest.orchestrator.agent.AgentLoop} 调用，是模型工具请求的
+ * 唯一执行入口（ask_user 除外）。单文件 1MB、单次读取 256KB / 2000 行、
+ * 单进程输出 64KB 均有上限；写文件使用临时文件原子替换。子进程环境只透传
+ * 构建测试所需变量，输出中的已配置密钥会被脱敏；REVIEW 模式额外套用
+ * {@link ReviewCommandPolicy}。所有文件路径均由沙箱限制在仓库根内。
  */
 public class ToolExecutor {
 
@@ -65,10 +71,18 @@ public class ToolExecutor {
         return sandbox;
     }
 
+    /**
+     * 按规范化工具名分派执行。
+     *
+     * <p>写工具与规划模式的 Shell 在分派前直接拒绝；ask_user 必须由 AgentLoop 处理。
+     * 参数缺失或类型错误抛 INVALID_ARGUMENT；路径越界、敏感路径与命令拦截分别由
+     * {@link WorkspaceSandbox} 和命令策略抛 {@link ToolException}。
+     */
     public Object execute(String rawToolName, Map<String, Object> arguments, AgentMode mode) {
         String toolName = ToolRegistry.canonical(rawToolName);
         Map<String, Object> args = arguments == null ? Map.of() : arguments;
         AgentMode effectiveMode = mode == null ? AgentMode.EXECUTION : mode;
+        // 在分派前统一做模式门禁，避免依赖每个工具实现自觉检查权限。
         if (effectiveMode != AgentMode.EXECUTION
                 && (ToolRegistry.FS_CREATE.equals(toolName)
                 || ToolRegistry.FS_WRITE.equals(toolName)
@@ -308,6 +322,10 @@ public class ToolExecutor {
         return result;
     }
 
+    /**
+     * 执行本地 Shell。命令先过策略，超时强杀整个进程树；输出截断并脱敏。
+     * 工作目录必须在沙箱内，默认为仓库根。
+     */
     private Map<String, Object> shell(Map<String, Object> args, boolean reviewMode) {
         String command = stringArg(args, "command", null, true).trim();
         String rawCwd = stringArg(args, "cwd", ".", false);
@@ -316,6 +334,7 @@ public class ToolExecutor {
                 : sandbox.resolveExisting(rawCwd, true);
         int timeoutMs = clamp(intArg(args, "timeoutMs", DEFAULT_TIMEOUT_MS),
                 1_000, MAX_TIMEOUT_MS);
+        // 审核模式先过更严格的白名单；普通执行只过危险命令策略。
         if (reviewMode) {
             reviewCommandPolicy.check(command);
         } else {
@@ -378,6 +397,7 @@ public class ToolExecutor {
         return List.of("/bin/sh", "-c", command);
     }
 
+    // 只透传构建 / 测试所需变量，避免把密钥等敏感环境变量泄漏给模型发起的进程。
     private void filterEnvironment(Map<String, String> environment) {
         Map<String, String> current = System.getenv();
         environment.clear();
@@ -427,6 +447,7 @@ public class ToolExecutor {
         process.destroyForcibly();
     }
 
+    // 命令与输出中出现的已配置密钥统一替换，防止进入事件账本与模型上下文。
     private String redact(String value) {
         String result = value;
         for (String secret : secrets.get()) {
@@ -437,6 +458,7 @@ public class ToolExecutor {
         return result;
     }
 
+    // 先写同目录临时文件再原子替换，避免写入中断留下半截源码。
     private void atomicWrite(Path target, byte[] bytes, boolean replace) {
         Path parent = target.getParent();
         Path temp = null;

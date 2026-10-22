@@ -4,6 +4,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 直属子任务在内存中的实时状态，由 {@link TaskProjection} 根据事件推进。
+ *
+ * <p>{@code order} 决定界面展示顺序；事件早于 plan 抵达时由投影创建占位节点，
+ * 使用较大的排序号排在正常计划行之后。字段在运行锁保护下读写。</p>
+ */
 public class TaskNodeState {
 
     private final String taskId;
@@ -119,6 +125,9 @@ public class TaskNodeState {
         this.completedAt = completedAt;
     }
 
+    /**
+     * 子任务是否已进入终态。
+     */
     public boolean isTerminal() {
         return status.isTerminal();
     }

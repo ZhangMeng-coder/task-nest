@@ -26,8 +26,15 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 规划会话的内存状态 + 事件持久化 + SSE 投递。
- * 规划事件写 tn_plan_session_event，不写 tn_event；确认前不创建主任务。
+ * 规划会话的聚合存储：内存状态、事件持久化与 SSE 扇出。
+ *
+ * <p>会话对象保存在进程内的 {@link ConcurrentHashMap}，进程重启后不可续传；
+ * 规划事件写入 {@code tn_plan_session_event}，会话摘要写入 {@code tn_plan_session}，
+ * 不使用运行事件表 {@code tn_event}。确认前不创建主任务。</p>
+ *
+ * <p>事件发布顺序与运行侧一致：在会话锁内分配 seq → 组装信封 → 追加内存事件
+ * → 应用状态语义 → 持久化事件与会话 → 投递订阅者。终止事件会在入队后要求
+ * 连接“刷完即关”；持久化失败只记录日志，不阻断 SSE。</p>
  */
 @Service
 public class PlanSessionStore {
@@ -47,18 +54,20 @@ public class PlanSessionStore {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 创建内存会话并写入会话摘要记录（初始状态 {@code RUNNING}、seq 为 0）。
+     * 主任务此时尚未创建。
+     */
     public PlanSessionState create(String planSessionId,
                                    String goal,
-                                   String workingDir,
-                                   String mockScript) {
+                                   String workingDir) {
         PlanSessionState state = new PlanSessionState(
-                planSessionId, goal, workingDir, mockScript);
+                planSessionId, goal, workingDir);
         LocalDateTime now = LocalDateTime.now();
         PlanSessionEntity entity = new PlanSessionEntity();
         entity.setPlanSessionId(planSessionId);
         entity.setGoal(goal);
         entity.setWorkingDir(workingDir);
-        entity.setMockScript(mockScript);
         entity.setStatus(PlanSessionStatus.RUNNING.name());
         entity.setLastSeq(0L);
         entity.setCreatedAt(now);
@@ -68,6 +77,10 @@ public class PlanSessionStore {
         return state;
     }
 
+    /**
+     * 取回会话；不存在（含进程重启后的旧会话）时返回
+     * {@link ErrorCode#PLAN_SESSION_NOT_FOUND}。
+     */
     public PlanSessionState require(String planSessionId) {
         PlanSessionState state = sessions.get(planSessionId);
         if (state == null) {
@@ -84,6 +97,16 @@ public class PlanSessionStore {
         sessions.remove(planSessionId);
     }
 
+    /**
+     * 发布一条规划事件并同步推进会话状态。
+     *
+     * <p>seq 在会话锁内分配，保证严格递增；{@code eventId} 由 seq 推导。
+     * 事件会先追加到内存、应用语义、写库，再入队各 SSE 连接。终止事件
+     * （{@code run_completed} / {@code error}）入队后立即请求连接刷完即关；
+     * 非终止事件只入队。数据库异常被吞掉，不会阻止事件继续推送。</p>
+     *
+     * @return 已分配 seq 与时间戳的事件信封
+     */
     public EventEnvelope publish(PlanSessionState state,
                                  EventType type,
                                  TaskRef task,
@@ -114,10 +137,16 @@ public class PlanSessionStore {
         return event;
     }
 
+    /**
+     * 发布心跳。心跳同样占用 seq，确保 {@code afterSeq} 补发游标连续。
+     */
     public EventEnvelope publishHeartbeat(PlanSessionState state) {
         return publish(state, EventType.HEARTBEAT, null, new EventPayload.Empty());
     }
 
+    /**
+     * 直接更新会话状态并持久化，不发布事件。用于不产生对外事件的内部状态同步。
+     */
     public void updateStatus(PlanSessionState state,
                              PlanSessionStatus status,
                              String error) {
@@ -131,12 +160,18 @@ public class PlanSessionStore {
         }
     }
 
+    /**
+     * 记录当前等待抉择的问题，供 {@code submitInput} 校验 taskId 与选项。
+     */
     public void setWaiting(PlanSessionState state, WaitingInputState waiting) {
         synchronized (state.getLock()) {
             state.setWaitingInput(waiting);
         }
     }
 
+    /**
+     * 清除等待态；仅当传入的问题正是当前问题时才清除，避免并发覆盖新问题。
+     */
     public void clearWaiting(PlanSessionState state, WaitingInputState waiting) {
         synchronized (state.getLock()) {
             if (state.getWaitingInput() == waiting) {
@@ -164,13 +199,16 @@ public class PlanSessionStore {
                 }
             }
             case RUN_COMPLETED -> {
-                // 状态由确认 / 取消流程先行设置。
+                // RUN_COMPLETED 只是终止信号；CONFIRMED / CANCELLED 由确认、取消流程先行写入。
             }
             default -> {
             }
         }
     }
 
+    /**
+     * 事件原文以 JSON 落库。持久化失败只记日志，内存状态与 SSE 投递仍然有效。
+     */
     private void persistEvent(PlanSessionState state, EventEnvelope event) {
         try {
             PlanSessionEventEntity entity = new PlanSessionEventEntity();
@@ -188,6 +226,10 @@ public class PlanSessionStore {
         }
     }
 
+    /**
+     * 回写会话摘要（状态、计划 JSON、最后 seq、错误）。记录不存在时静默跳过，
+     * 数据库异常同样只记日志。
+     */
     private void persistSession(PlanSessionState state) {
         try {
             PlanSessionEntity entity = sessionService.getOne(

@@ -22,6 +22,11 @@ import java.util.Map;
 /**
  * 最小 OpenAI 兼容 /chat/completions 客户端，支持 function tool calling。
  * 不依赖 Spring AI，避免其与当前 Spring Boot 版本不匹配；请求与响应格式保持兼容。
+ *
+ * <p>由各 Agent 经 {@link com.tasknest.orchestrator.agent.AgentLoop} 调用。
+ * Base URL 与模型名取自 {@link LlmSettingsService} 的运行时快照，API Key 每次调用时解析；
+ * 连接超时 20 秒、请求超时 4 分钟。HTTP 非 2xx 统一映射为 {@link LlmException}，
+ * 400 / 422 且错误信息涉及 tool / function 时标记为 LLM_TOOL_CALLING_UNSUPPORTED。
  */
 @Component
 public class LlmClient {
@@ -42,15 +47,26 @@ public class LlmClient {
                 .build();
     }
 
+    /** 当前运行时快照中的模型名称，用于事件与审核结果标注。 */
     public String modelName() {
         return settings.current().modelName();
     }
 
+    /** 当前设置能否解析出非空 API Key；ENV 模式会在此刻读取环境变量。 */
     public boolean configured() {
         String key = settings.resolveApiKey();
         return key != null && !key.isBlank();
     }
 
+    /**
+     * 发起一次 chat completion。
+     *
+     * <p>请求携带低温度与 messages；tools 非空时附加 {@code tool_choice=auto}。
+     * 未配置 API Key 抛 LLM_NOT_CONFIGURED；网络、序列化或响应结构错误抛
+     * LLM_REQUEST_FAILED。返回的 tool_calls 未执行，由 AgentLoop 归一化后调用工具。
+     *
+     * @param tools OpenAI function 定义；null 或空表示不启用工具
+     */
     public LlmResponse chat(List<LlmMessage> messages, List<Map<String, Object>> tools) {
         LlmSettingsService.CurrentLlmSettings current = settings.current();
         String apiKey = settings.resolveApiKey();
@@ -61,6 +77,7 @@ public class LlmClient {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", current.modelName());
         body.put("messages", messages.stream().map(LlmMessage::toWire).toList());
+        // 低温度减少工具调用参数漂移，保证计划与审核 JSON 输出稳定。
         body.put("temperature", 0.2);
         if (tools != null && !tools.isEmpty()) {
             body.put("tools", tools);
@@ -93,6 +110,7 @@ public class LlmClient {
         }
         if (response.statusCode() / 100 != 2) {
             String message = errorMessage(response.body(), response.statusCode());
+            // 部分兼容服务不支持 function calling，用 400/422 + 错误文本识别并单独标记。
             boolean toolIssue = message.toLowerCase().contains("tool")
                     || message.toLowerCase().contains("function");
             String code = (response.statusCode() == 400 || response.statusCode() == 422)
@@ -181,6 +199,7 @@ public class LlmClient {
         return "模型服务返回 HTTP " + status + (value.isEmpty() ? "" : ": " + value);
     }
 
+    // 允许 Base URL 填到 /chat/completions，或只填到服务根 / /v1。
     private String endpoint(String baseUrl) {
         String value = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         if (value.endsWith("/chat/completions")) {
@@ -189,7 +208,10 @@ public class LlmClient {
         return value + "/chat/completions";
     }
 
-    /** 一条 OpenAI 兼容消息。 */
+    /**
+     * 一条 OpenAI 兼容消息。tool 消息必须携带 toolCallId，与 assistant 消息中的
+     * tool_calls 一一配对；{@link #toWire()} 会把内部字段转换为 snake_case 的请求结构。
+     */
     public record LlmMessage(
             String role,
             String content,
@@ -216,6 +238,7 @@ public class LlmClient {
         public Map<String, Object> toWire() {
             Map<String, Object> wire = new LinkedHashMap<>();
             wire.put("role", role);
+            // assistant 可只带 tool_calls 而不带 content；其他角色始终保留 content 字段。
             if (content != null && !content.isEmpty()) {
                 wire.put("content", content);
             } else if (!"assistant".equals(role)) {
@@ -239,15 +262,18 @@ public class LlmClient {
         }
     }
 
+    /** 模型返回的一次 function 调用；arguments 是尚未解析的 JSON 字符串。 */
     public record LlmToolCall(String id, String name, String arguments) {
     }
 
+    /** 一次 chat completion 的解析结果；toolCalls 可能为空，finishReason 可能为 null。 */
     public record LlmResponse(
             String content,
             List<LlmToolCall> toolCalls,
             String finishReason,
             String model
     ) {
+        /** 本轮响应是否请求了至少一次工具调用。 */
         public boolean hasToolCalls() {
             return toolCalls != null && !toolCalls.isEmpty();
         }

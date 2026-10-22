@@ -6,7 +6,12 @@ import com.baomidou.mybatisplus.annotation.TableName;
 
 import java.time.LocalDateTime;
 
-/** 创建主任务前的 SSE 规划会话；确认后才创建主任务。 */
+/**
+ * {@code tn_plan_session} 创建主任务前的 SSE 规划会话实体。
+ * <p>{@code PlanSessionStore} 维护会话生命周期；只有确认后 {@code RunService} 才创建主任务。
+ * {@code plan_session_id} 同时作为规划 SSE 的 {@code runId}，{@code plan_json} 为 LONGTEXT
+ * JSON，{@code status} 使用规划会话状态枚举名，{@code last_seq} 记录已产生的事件序号。</p>
+ */
 @TableName("tn_plan_session")
 public class PlanSessionEntity {
 
@@ -15,7 +20,6 @@ public class PlanSessionEntity {
     private String planSessionId;
     private String goal;
     private String workingDir;
-    private String mockScript;
     private String status;
     private String planJson;
     private Long lastSeq;
@@ -53,14 +57,6 @@ public class PlanSessionEntity {
 
     public void setWorkingDir(String workingDir) {
         this.workingDir = workingDir;
-    }
-
-    public String getMockScript() {
-        return mockScript;
-    }
-
-    public void setMockScript(String mockScript) {
-        this.mockScript = mockScript;
     }
 
     public String getStatus() {

@@ -6,6 +6,11 @@ import com.baomidou.mybatisplus.annotation.TableName;
 
 import java.time.LocalDateTime;
 
+/**
+ * {@code tn_prompt} 提示词拼装记录，每次 {@code prompt_assembled} 事件一行。
+ * <p>{@code RunPersistenceService} 写入系统/用户提示词、上下文片段 JSON 与最终提示词；
+ * 提示词列均为 LONGTEXT，{@code (main_task_id, seq)} 唯一，重试时允许同一任务保留多轮记录。</p>
+ */
 @TableName("tn_prompt")
 public class PromptEntity {
 

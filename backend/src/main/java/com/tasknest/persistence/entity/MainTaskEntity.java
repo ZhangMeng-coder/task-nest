@@ -6,6 +6,12 @@ import com.baomidou.mybatisplus.annotation.TableName;
 
 import java.time.LocalDateTime;
 
+/**
+ * {@code tn_main_task} 主任务档案实体，一行对应一次运行。
+ * <p>{@code RunPersistenceService} 创建 PENDING 记录，并随运行事件更新状态、摘要、
+ * 错误与等待抉择；{@code status} 使用 {@link com.tasknest.store.MainTaskStatus} 枚举名，
+ * {@code waiting_options} 为决策选项 JSON 文本。</p>
+ */
 @TableName("tn_main_task")
 public class MainTaskEntity {
 
@@ -16,7 +22,6 @@ public class MainTaskEntity {
     private String rootTaskId;
     private String title;
     private String goal;
-    private String mockScript;
     private String status;
     private String summary;
     private String error;
@@ -74,14 +79,6 @@ public class MainTaskEntity {
 
     public void setGoal(String goal) {
         this.goal = goal;
-    }
-
-    public String getMockScript() {
-        return mockScript;
-    }
-
-    public void setMockScript(String mockScript) {
-        this.mockScript = mockScript;
     }
 
     public String getStatus() {

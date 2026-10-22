@@ -8,7 +8,3 @@ spring:
     init:
       mode: always
       encoding: UTF-8
-
-tasknest:
-  mock:
-    delay-scale: 0.05

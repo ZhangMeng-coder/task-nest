@@ -5,7 +5,6 @@ import {
   apiBase,
   cancelPlanSession,
   confirmPlanSession,
-  createMainTask,
   createPlanSession,
   describeError,
   getMainTaskDetail,
@@ -118,7 +117,6 @@ function isTerminalPlanSession(status: PlanSessionStatus | null): boolean {
 export const useTaskTreeStore = defineStore('taskTree', () => {
   const runId = ref<string | null>(null)
   const mainTaskId = ref<string | null>(null)
-  const mockScript = ref<string | null>(null)
   const goal = ref<string | null>(null)
   const workingDir = ref<string | null>(null)
   const runStatus = ref<RunStatus | null>(null)
@@ -374,7 +372,7 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
       && payload.revision !== null
       && payload.revision > plan.value.version
     ) {
-      plan.value = planDraftFromPlan(payload, goal.value, mockScript.value)
+      plan.value = planDraftFromPlan(payload, goal.value)
     }
 
     const directChildren = tasks.filter((task) => task.parentTaskId === root.taskId)
@@ -808,7 +806,6 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
 
     mainTaskId.value = snapshot.run.mainTaskId
     goal.value = snapshot.run.goal
-    mockScript.value = snapshot.run.mockScript
     runStatus.value = snapshot.run.status
     runSummary.value = null
     runTerminal.value = snapshot.run.status !== 'RUNNING'
@@ -994,7 +991,6 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     recoveryPromise = null
     runId.value = null
     mainTaskId.value = null
-    mockScript.value = null
     goal.value = null
     workingDir.value = null
     runStatus.value = null
@@ -1039,51 +1035,6 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     archiveLoading.value = false
     archiveError.value = null
     libraryOpen.value = false
-  }
-
-  async function startRun(
-    script: string,
-    goalText?: string,
-    planDraft?: PlanDraftView | null,
-    workingDirValue?: string | null,
-  ): Promise<boolean> {
-    if (starting.value) {
-      return false
-    }
-    reset()
-    starting.value = true
-    try {
-      const response = await createMainTask(
-        script,
-        goalText,
-        planDraft
-          ? {
-              title: planDraft.title,
-              rows: planDraft.rows,
-              revisions: planDraft.revisions,
-            }
-          : undefined,
-        workingDirValue,
-      )
-      runId.value = response.runId
-      mainTaskId.value = response.mainTaskId
-      mockScript.value = response.mockScript
-      workingDir.value = response.workingDir ?? workingDirValue?.trim() ?? null
-      plan.value = response.plan
-      mainCreatedAt.value = response.createdAt
-      mainUpdatedAt.value = response.createdAt
-      goal.value = response.plan?.goal?.trim() || goalText?.trim() || null
-      runStatus.value = 'RUNNING'
-      connection.value = 'CONNECTING'
-      starting.value = false
-      connect(response.runId, 0)
-      return true
-    } catch (error) {
-      starting.value = false
-      connection.value = 'IDLE'
-      globalError.value = describeError(error)
-      return false
-    }
   }
 
   /** 修订已保存的计划表；返回是否成功，失败原因写入 planError。 */
@@ -1374,7 +1325,6 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
   function planDraftFromPlan(
     payload: PlanPayload,
     goalText: string | null,
-    script: string | null,
   ): PlanDraftView {
     const root = payload.tasks.find((task) => task.parentTaskId === null)
     const title = root?.title ?? '软件开发任务'
@@ -1407,7 +1357,6 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
       mainTaskId: mainTaskId.value,
       title,
       goal: goalText ?? '',
-      mockScript: script,
       version: payload.revision ?? 1,
       markdown: lines.join('\n'),
       rows,
@@ -1418,7 +1367,6 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
   async function startPlanning(
     goalText: string,
     workingDirValue: string,
-    script?: string | null,
   ): Promise<boolean> {
     if (planningStarting.value) {
       return false
@@ -1428,19 +1376,14 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     planningStarting.value = true
     planningError.value = null
     try {
-      const response = await createPlanSession(
-        goalText,
-        workingDirValue,
-        script && script.trim().length > 0 ? script.trim() : null,
-      )
+      const response = await createPlanSession(goalText, workingDirValue)
       planSessionId.value = response.planSessionId
       planningStatus.value = response.status
       planningConnection.value = 'CONNECTING'
       goal.value = goalText.trim()
       workingDir.value = workingDirValue.trim()
-      mockScript.value = script && script.trim().length > 0 ? script.trim() : null
       planningStarting.value = false
-      // 从 0 开始补发历史，Mock 计划可能在创建响应前就已发布。
+      // 从 0 开始补发历史，避免创建响应与首条事件之间的空窗。
       connectPlanning(response.planSessionId, 0)
       return true
     } catch (error) {
@@ -1510,7 +1453,6 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     planningError.value = null
     const plannedPlan = planningPlan.value
     const goalText = goal.value
-    const script = mockScript.value
     try {
       const response = await confirmPlanSession(id)
       planningStatus.value = 'CONFIRMED'
@@ -1524,8 +1466,7 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
       mainTaskId.value = response.mainTaskId
       workingDir.value = response.workingDir
       goal.value = goalText
-      mockScript.value = script
-      plan.value = planDraftFromPlan(plannedPlan, goalText, script)
+      plan.value = planDraftFromPlan(plannedPlan, goalText)
       mainCreatedAt.value = new Date().toISOString()
       mainUpdatedAt.value = mainCreatedAt.value
       runStatus.value = 'RUNNING'
@@ -1629,7 +1570,6 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     const summary = detail.mainTask
     runId.value = summary.runId
     mainTaskId.value = summary.mainTaskId
-    mockScript.value = summary.mockScript
     workingDir.value = summary.workingDir
     goal.value = summary.goal
     plan.value = detail.plan
@@ -1759,7 +1699,6 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
   return {
     runId,
     mainTaskId,
-    mockScript,
     goal,
     workingDir,
     runStatus,
@@ -1821,7 +1760,6 @@ export const useTaskTreeStore = defineStore('taskTree', () => {
     failedCount,
     waitingCount,
     unknownTaskCount,
-    startRun,
     revisePlan,
     startPlanning,
     revisePlanning,

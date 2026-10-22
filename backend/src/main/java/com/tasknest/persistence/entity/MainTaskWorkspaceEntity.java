@@ -7,7 +7,9 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
 
 /**
- * 主任务工作目录。与主任务一对一；没有选择目录时不写入记录。
+ * {@code tn_main_task_workspace} 主任务工作目录，与主任务一对一。
+ * <p>{@code RunPersistenceService#createPending} 仅在传入非空目录时写入；{@code working_dir}
+ * 由后端校验目录存在并规范化为 Git 仓库根绝对路径，未选择目录则没有对应记录。</p>
  */
 @TableName("tn_main_task_workspace")
 public class MainTaskWorkspaceEntity {

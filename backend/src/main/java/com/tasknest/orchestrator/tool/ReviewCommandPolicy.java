@@ -7,6 +7,11 @@ import java.util.Set;
 /**
  * 审核 Agent 的 Shell 白名单：只允许测试、lint、build、类型检查与只读 Git。
  * 危险命令策略仍会先执行；这里再收紧到可审计的构建/测试命令。
+ *
+ * <p>属于工具安全层：{@link ToolExecutor} 在 REVIEW 模式执行 shell.exec 前调用。
+ * 复合命令按 {@code &&} / {@code ||} / {@code ;} 分段校验，禁止管道与重定向；
+ * 允许前置 {@code VAR=value} 环境变量赋值，但按真实可执行文件判断白名单。
+ * 命中即抛 COMMAND_BLOCKED。
  */
 public class ReviewCommandPolicy {
 
@@ -28,6 +33,10 @@ public class ReviewCommandPolicy {
 
     private final CommandPolicy commandPolicy = new CommandPolicy();
 
+    /**
+     * 校验审核命令。空命令与 {@code none} 单独处理；其余先过危险命令策略，
+     * 再逐段检查是否属于允许的测试 / 构建工具与目标。
+     */
     public void check(String command) {
         String value = command == null ? "" : command.trim();
         if (value.isEmpty()) {
@@ -37,11 +46,13 @@ public class ReviewCommandPolicy {
             return;
         }
         commandPolicy.check(value);
+        // 复合命令逐段校验，避免用 && / || / ; 把危险段藏在白名单命令之后。
         for (String segment : value.split("&&|\\|\\||;")) {
             checkSegment(stripEnvironment(segment.trim()));
         }
     }
 
+    /** 命令是否通过白名单；用于测试探测结果的可用性判断，不抛出异常。 */
     public boolean allows(String command) {
         try {
             check(command);
@@ -180,6 +191,7 @@ public class ReviewCommandPolicy {
         }
     }
 
+    // 跳过前置 VAR=value 赋值，按真实可执行文件判断白名单，而不是把变量名当命令。
     private String stripEnvironment(String segment) {
         String value = segment;
         while (value.matches("^[A-Za-z_][A-Za-z0-9_]*=.*")) {

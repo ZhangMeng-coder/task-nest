@@ -117,42 +117,6 @@ export const EVENT_TYPE_LABEL: Record<EventType, string> = {
   heartbeat: '心跳',
 }
 
-export interface ScriptOption {
-  id: string
-  name: string
-  summary: string
-}
-
-export const SCRIPT_OPTIONS: ScriptOption[] = [
-  {
-    id: 'happy-path',
-    name: '顺利路径',
-    summary: '两层任务全部成功，先看清结构、思考与工具调用。',
-  },
-  {
-    id: 'with-ambiguity',
-    name: '需要抉择',
-    summary: '执行到中途暂停，等你选择一个缓存策略再继续。',
-  },
-  {
-    id: 'with-failure',
-    name: '失败与重试',
-    summary: '访问凭据首次失效，重试后恢复，观察重试状态。',
-  },
-  {
-    id: 'with-noise',
-    name: '噪声投递',
-    summary: '重复事件、乱序到达与丢投，验证工作台能否收敛。',
-  },
-]
-
-export function scriptName(id: string | null): string {
-  if (!id) {
-    return '真实 Agent'
-  }
-  return SCRIPT_OPTIONS.find((option) => option.id === id)?.name ?? id
-}
-
 export function formatClock(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) {

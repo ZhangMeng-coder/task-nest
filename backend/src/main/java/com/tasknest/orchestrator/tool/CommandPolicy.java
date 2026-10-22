@@ -9,6 +9,11 @@ import java.util.regex.Pattern;
 /**
  * 危险命令防护栏。命中后不执行，返回 COMMAND_BLOCKED。
  * 规则匹配是尽力而为，不是不可绕过的安全边界。
+ *
+ * <p>属于工具安全层：{@link ToolExecutor} 在非审核模式执行 Shell 前调用；
+ * 审核模式还会叠加 {@link ReviewCommandPolicy}。规则覆盖磁盘 / 电源 / 注册表、
+ * 递归删除根目录、提权、Git 写操作与危险选项、下载即执行、数据库破坏、fork bomb
+ * 与敏感路径。Git 调用按只读子命令白名单解析，带值全局选项会跳过其参数。
  */
 public class CommandPolicy {
 
@@ -18,6 +23,7 @@ public class CommandPolicy {
     private static final Set<String> GIT_OPTIONS_WITH_VALUE = Set.of(
             "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path",
             "--super-prefix", "--config-env");
+    // 正则按“尽力拦截”设计，覆盖常见破坏性命令，不追求完整 Shell 语法分析。
     private static final List<Rule> RULES = List.of(
             new Rule("windows-disk", "(?i)(^|[&|;]\\s*)(format|diskpart|bcdedit)(\\s|$)"),
             new Rule("system-power", "(?i)(^|[&|;]\\s*)(shutdown|reboot)(\\s|$)"),
@@ -43,6 +49,10 @@ public class CommandPolicy {
             new Rule("git-config-file", "(?i)\\.git[/\\\\]config\\b")
     );
 
+    /**
+     * 校验命令；命中任一规则抛 {@link ToolException}（COMMAND_BLOCKED），
+     * {@code rule} 为具体规则名，便于事件与日志审计。
+     */
     public void check(String command) {
         String value = command == null ? "" : command;
         for (Rule rule : RULES) {
@@ -55,6 +65,7 @@ public class CommandPolicy {
     }
 
     private void checkGit(String command) {
+        // 逐段扫描 git 调用：跳过带值选项后，第一个非选项 token 必须是只读子命令。
         String lower = command.toLowerCase(Locale.ROOT);
         if (lower.contains("--exec-path")
                 || lower.contains("--upload-pack")

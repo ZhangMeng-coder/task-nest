@@ -105,8 +105,7 @@ Claude Code：
 10. 规划失败或超时：发送 `error(PLAN_AGENT_UNAVAILABLE / PLAN_AGENT_FAILED)`，
     会话 `FAILED`；已产生的规划事件仍可查询。
 
-同步的 `plan-drafts` / `plan-drafts/revise` 保留给 Mock 脚本与回归测试，P3 正式前端
-不再使用；创建主任务必须来自已确认的规划会话。
+规划会话是 P3 唯一的创建入口；创建主任务必须来自已确认的规划会话。
 
 ### 5.2 启动与执行
 
@@ -693,12 +692,11 @@ POST   /api/main-tasks/plan-sessions/{planSessionId}/cancel
 ```json
 {
   "goal": "为任务详情增加审核面板",
-  "workingDir": "E:\\workspace\\demo",
-  "mockScript": "happy-path"
+  "workingDir": "E:\\workspace\\demo"
 }
 ```
 
-- `goal`、`workingDir` 必填；`mockScript` 仅用于 Mock 演练，可为空。
+- `goal`、`workingDir` 必填；工作目录必须是已存在的本地 Git 仓库。
 - 返回 `{planSessionId, status: "RUNNING", lastSeq: 0}`；不创建主任务。
 - 快照返回 `{planSessionId, status, goal, workingDir, plan, lastSeq, error}`。
 - 状态：`RUNNING` / `WAITING_INPUT` / `READY` / `CONFIRMED` / `CANCELLED` / `FAILED`。
@@ -726,8 +724,7 @@ POST   /api/main-tasks/plan-sessions/{planSessionId}/cancel
 - `cancel` 将会话置为 `CANCELLED`，发送 `run_completed` 后关闭；不创建主任务。
 - 规划失败或超时发送 `error`（`PLAN_AGENT_UNAVAILABLE` / `PLAN_AGENT_FAILED`），
   会话 `FAILED`，已产生的事件仍可查询。
-- `POST /api/main-tasks` 与同步 `plan-drafts` 接口保留给 Mock 兼容；P3 正式前端只用
-  规划会话确认后创建主任务，不直接调用创建接口。
+- 创建主任务只能走 `confirm`；前端不直接调用任何创建接口。
 
 ### 9.4 LLM 配置
 
@@ -763,7 +760,7 @@ POST   /api/main-tasks/plan-sessions/{planSessionId}/cancel
 
 ### 10.2 计划 payload 扩展
 
-`plan.tasks[]` 增加可选字段，保持对现有 Mock 脚本兼容：
+`plan.tasks[]` 增加以下可选字段：
 
 ```json
 {
@@ -783,7 +780,7 @@ POST   /api/main-tasks/plan-sessions/{planSessionId}/cancel
 }
 ```
 
-- `description`、`acceptanceCriteria` 在 P3 主 Agent 生成计划时必填；旧脚本可省略。
+- `description`、`acceptanceCriteria` 由规划 Agent 生成，确认前必填。
 - `allowedTools` 可选；缺省为六类工具全集，审核 Agent 始终只有只读文件工具与受限
   测试 Shell。
 - `testCommand` 可选；审核 Agent 优先执行它，缺省时按项目类型自动探测。纯文档任务可
@@ -874,7 +871,7 @@ POST   /api/main-tasks/plan-sessions/{planSessionId}/cancel
 ```
 
 - `options` 允许为空数组，最多 8 个；为空时 `allowCustom` 必须为 `true`。
-- 旧 Mock 脚本仍要求至少 2 个选项；P3 Agent 可发送 0–8 个。
+- Agent 可发送 0–8 个选项。
 - `allowCustom` 缺省 `false`，兼容旧事件；P3 Agent 默认使用 `true`。
 - 单选，不提供多选；选项 `id` 在单个事件内唯一。
 - `question` 最长 2000 字，`label` 最长 200 字，`description` 最长 500 字。
@@ -904,7 +901,7 @@ POST   /api/main-tasks/plan-sessions/{planSessionId}/cancel
 
 ```text
 orchestrator/
-  CodingTaskOrchestrator        实现 TaskOrchestrator，替换 Mock Bean，只负责执行
+  CodingTaskOrchestrator        实现 TaskOrchestrator，只负责执行
   PlanningAgent                 规划会话中的模型循环，只使用只读工具
   AgentLoop                     单次模型会话循环：提示词 → 工具调用 → 结果 → 再调用
   MainAgent / SubAgent / ReviewAgent

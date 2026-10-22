@@ -12,7 +12,13 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
-/** 执行运行的事件出口。 */
+/**
+ * 执行运行的事件出口。
+ *
+ * <p>实现 {@link AgentSession}：事件交给 {@link EventPublisher} 同步持久化并推入 SSE；
+ * 等待人工输入时把 {@link WaitingInputState} 挂到 {@link RunState}，运行进入终态后
+ * 轮询退出并返回 {@code null}。清理等待状态时用身份比较，避免误清后续等待。
+ */
 public class RunAgentSession implements AgentSession {
 
     private final RunState run;
@@ -33,6 +39,12 @@ public class RunAgentSession implements AgentSession {
         return run.isTerminal();
     }
 
+    /**
+     * 发出 waiting_input 并阻塞等待用户输入。
+     *
+     * <p>运行终止、取消或线程中断时返回 {@code null}；收到输入后补发 input_received。
+     * 等待状态通过 {@link RunState} 暴露给 REST 抉择接口。
+     */
     @Override
     public UserInput awaitInput(TaskRef task, EventPayload.WaitingInput waiting) {
         BlockingQueue<UserInput> queue = new LinkedBlockingQueue<>(1);
@@ -50,6 +62,7 @@ public class RunAgentSession implements AgentSession {
         eventPublisher.publish(run, EventType.WAITING_INPUT, task, waiting);
         UserInput input = await(run, queue);
         synchronized (run.getLock()) {
+            // 只清理本次登记的等待状态，避免覆盖运行期间新产生的 waiting_input。
             if (run.getWaitingInput() == state) {
                 run.setWaitingInput(null);
             }

@@ -16,7 +16,13 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 
-/** 审核 Agent 全局设置：启动加载，保存后立即替换运行时快照。 */
+/**
+ * 审核 Agent 的全局设置（单例表 {@code tn_agent_setting}，{@code id=1}）。
+ *
+ * <p>启动时通过 {@link PostConstruct} 从 MySQL 加载，读取失败回退默认值
+ * （开启审核、最大重做 2 次）。保存走事务写库，成功后替换 volatile 运行时快照，
+ * 使编排器无需重启即可应用新设置。设置只控制审核开关与重做上限，不包含密钥。</p>
+ */
 @Service
 public class AgentSettingsService {
 
@@ -31,6 +37,10 @@ public class AgentSettingsService {
         this.settingService = settingService;
     }
 
+    /**
+     * 启动加载单例设置。记录缺失或读取异常时保留构造器中的默认快照，
+     * 不影响应用启动。
+     */
     @PostConstruct
     public void load() {
         try {
@@ -43,12 +53,22 @@ public class AgentSettingsService {
         }
     }
 
+    /**
+     * 读取当前运行时快照的只读视图（不含内部实体）。
+     */
     public AgentSettingsView view() {
         CurrentAgentSettings snapshot = current;
         return new AgentSettingsView(
                 snapshot.reviewEnabled(), snapshot.reviewMaxReworks(), snapshot.updatedAt());
     }
 
+    /**
+     * 校验并保存审核设置，随后立即替换运行时快照。快照替换与写库在同一个
+     * 事务方法内，发生在事务提交之前。
+     *
+     * @throws BusinessException 字段缺失或 {@code reviewMaxReworks} 超出 0–5 时抛出
+     *                           {@link ErrorCode#INVALID_PARAM}
+     */
     @Transactional
     public AgentSettingsView update(UpdateAgentSettingsRequest request) {
         if (request.reviewEnabled() == null || request.reviewMaxReworks() == null) {
@@ -76,6 +96,9 @@ public class AgentSettingsService {
         return view();
     }
 
+    /**
+     * 供编排器 / 审核流程读取的 volatile 运行时快照，调用方无需加锁。
+     */
     public CurrentAgentSettings current() {
         return current;
     }
@@ -94,6 +117,13 @@ public class AgentSettingsService {
         return new CurrentAgentSettings(enabled, maxReworks, updatedAt);
     }
 
+    /**
+     * 运行时快照。
+     *
+     * @param reviewEnabled   是否启用独立审核 Agent
+     * @param reviewMaxReworks 单个子任务允许的最大重做次数（0–5）
+     * @param updatedAt       最近一次保存时间；来自默认值时为 {@code null}
+     */
     public record CurrentAgentSettings(
             boolean reviewEnabled,
             int reviewMaxReworks,

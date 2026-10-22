@@ -23,9 +23,16 @@ import java.util.concurrent.TimeUnit;
 /**
  * 通用工具调用循环：模型输出 -> tool_call 事件 -> 执行 -> tool_result -> 继续，
  * 直到模型不再请求工具。ask_user 转化为 waiting_input / input_received。
+ *
+ * <p>规划、子任务执行、审核与重排共用本循环，差异只由 {@link AgentSpec} 的模式、
+ * 提示词与允许工具表达。循环开始时发布 prompt_assembled，每轮把模型文本作为
+ * task_thought 事件追加；工具调用按 callId 与 tool_result 配对，执行失败也转为
+ * ERROR 结果回传模型，让模型有机会改用安全方案而不是直接终止运行。
+ * 超过 {@code maxIterations} 抛 {@code AGENT_MAX_ITERATIONS}；会话取消时返回 cancelled 结果。
  */
 public class AgentLoop {
 
+    /** 单条工具结果回传给模型前的最大字符数，超出部分截断。 */
     private static final int MAX_TOOL_MESSAGE_CHARS = 300_000;
 
     private final LlmClient llm;
@@ -38,6 +45,15 @@ public class AgentLoop {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 执行完整循环并返回终止结果。
+     *
+     * <p>会发布 prompt_assembled、task_thought、tool_call / tool_result 事件；
+     * 模型在某一轮不再请求工具时结束，返回最后一次非空文本。会话取消时提前返回
+     * {@code cancelled=true}，不再调用模型或工具。
+     *
+     * @throws AgentException 超过 {@code spec.maxIterations()} 仍未结束（AGENT_MAX_ITERATIONS）
+     */
     public AgentOutcome run(AgentSession session, TaskRef task, AgentSpec spec) {
         List<LlmClient.LlmMessage> messages = new ArrayList<>();
         messages.add(LlmClient.LlmMessage.system(spec.systemPrompt()));
@@ -53,6 +69,7 @@ public class AgentLoop {
                 spec.mode(), spec.allowedTools());
         int toolCallCount = 0;
         String lastContent = "";
+        // 迭代上限兜底模型反复调用工具；耗尽即失败，避免运行无限占用线程与工作区。
         for (int iteration = 1; iteration <= spec.maxIterations(); iteration++) {
             if (session.cancelled()) {
                 return new AgentOutcome(lastContent, toolCallCount, true, iteration - 1);
@@ -67,6 +84,7 @@ public class AgentLoop {
             if (calls.isEmpty()) {
                 return new AgentOutcome(lastContent, toolCallCount, false, iteration);
             }
+            // assistant 消息携带 tool_calls，随后每条 tool 结果按 callId 与之一一配对。
             messages.add(LlmClient.LlmMessage.assistant(response.content(), calls));
             for (LlmClient.LlmToolCall call : calls) {
                 if (session.cancelled()) {
@@ -177,6 +195,7 @@ public class AgentLoop {
         }
         List<LlmClient.LlmToolCall> normalized = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
+        // 兼容服务可能缺失或重复 call id；补齐唯一 id，保证 tool_call / tool_result 可稳定配对。
         int index = 1;
         for (LlmClient.LlmToolCall call : calls) {
             String id = call.id();
@@ -263,6 +282,7 @@ public class AgentLoop {
     private String serialize(Object value) {
         try {
             String json = objectMapper.writeValueAsString(value);
+            // 读取大文件等结果可能远超上下文预算，截断后再写回模型消息。
             if (json.length() > MAX_TOOL_MESSAGE_CHARS) {
                 return json.substring(0, MAX_TOOL_MESSAGE_CHARS)
                         + "\n…[tool result truncated for model]";

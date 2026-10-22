@@ -28,10 +28,15 @@ public class GitService {
     private static final String INTERNAL_EMAIL = "tasknest@local";
     private static final long COMMAND_TIMEOUT_SECONDS = 120;
 
+    /** 校验通过后的仓库信息：规范化根目录、当前分支与 HEAD 提交。 */
     public record RepoInfo(Path root, String branch, String head) {
     }
 
-    /** 校验工作目录是可用的 Git 仓库根目录，且工作区干净。 */
+    /**
+     * 校验工作目录是可用的 Git 仓库根目录，且工作区干净。
+     * 路径会规范化为绝对真实路径；指向子目录、detached HEAD、脏工作区或非仓库时分别抛出
+     * 对应的 Git 错误码，调用方据此在创建运行前拒绝请求。
+     */
     public RepoInfo validate(Path workingDir) {
         if (workingDir == null) {
             throw new BusinessException(ErrorCode.GIT_NOT_REPOSITORY, "必须选择工作目录");
@@ -72,6 +77,7 @@ public class GitService {
         return new RepoInfo(root, branch, head);
     }
 
+    /** 探测本机 Git 是否可用：当前目录可 rev-parse，或能执行 git --version。 */
     public boolean isAvailable() {
         try {
             return run(Path.of(".").toAbsolutePath(), "rev-parse", "--git-dir").exitCode() == 0
@@ -95,6 +101,7 @@ public class GitService {
         }
     }
 
+    /** 返回当前分支短名；detached HEAD 或读取失败时返回 null。 */
     public String currentBranch(Path root) {
         ExecResult result = run(root, "symbolic-ref", "--short", "-q", "HEAD");
         if (result.exitCode() != 0) {
@@ -104,16 +111,19 @@ public class GitService {
         return branch.isEmpty() ? null : branch;
     }
 
+    /** 解析 ref 的完整提交 SHA；ref 不存在或命令失败时返回 null。 */
     public String headSha(Path root, String ref) {
         ExecResult result = run(root, "rev-parse", ref);
         return result.exitCode() == 0 ? result.stdout().trim() : null;
     }
 
+    /** 解析 ref 的短提交 SHA；失败时返回 null。 */
     public String shortSha(Path root, String ref) {
         ExecResult result = run(root, "rev-parse", "--short", ref);
         return result.exitCode() == 0 ? result.stdout().trim() : null;
     }
 
+    /** 工作区是否没有已暂存、未暂存或未跟踪改动。 */
     public boolean statusClean(Path root) {
         return statusLines(root).isEmpty();
     }
@@ -139,6 +149,7 @@ public class GitService {
         return result.exitCode() == 0 ? result.stdout().trim() : "";
     }
 
+    /** 切换到已存在的分支；失败按分支漂移（{@code GIT_BRANCH_DRIFT}）处理。 */
     public void checkout(Path root, String branch) {
         ExecResult result = run(root, "checkout", branch);
         if (result.exitCode() != 0) {
@@ -147,6 +158,7 @@ public class GitService {
         }
     }
 
+    /** 以 startPoint 为起点创建并检出 branch；失败抛 {@code GIT_BRANCH_CREATE_FAILED}。 */
     public void createAndCheckout(Path root, String branch, String startPoint) {
         ExecResult result = run(root, "checkout", "-b", branch, startPoint);
         if (result.exitCode() != 0) {
@@ -155,7 +167,10 @@ public class GitService {
         }
     }
 
-    /** 把工作区全部改动提交到当前分支；没有改动时返回 null。 */
+    /**
+     * 把工作区全部改动提交到当前分支（git add -A，跳过 hooks，使用内置身份）；
+     * 没有改动时返回 null。
+     */
     public String commitAll(Path root, String message) {
         ExecResult add = run(root, "add", "-A");
         if (add.exitCode() != 0) {
@@ -186,6 +201,10 @@ public class GitService {
         }
     }
 
+    /**
+     * 删除本地分支：force=false 使用 -d，仅允许删除已合并分支；true 使用 -D 强制删除。
+     * 调用方必须已切离该分支；删除失败抛 {@code GIT_ROLLBACK_FAILED}。
+     */
     public void deleteBranch(Path root, String branch, boolean force) {
         ExecResult result = run(root, "branch", force ? "-D" : "-d", branch);
         if (result.exitCode() != 0) {
@@ -194,13 +213,14 @@ public class GitService {
         }
     }
 
+    /** 尽力中止进行中的合并，忽略 git 返回码；用于冲突后的清理。 */
     public void abortMerge(Path root) {
         run(root, "merge", "--abort");
     }
 
     /**
      * 丢弃当前分支上的未提交改动与未跟踪文件，用于删除临时子任务分支前清理工作区。
-     * 只允许编排器在 tasknest/ 临时分支上调用。
+     * 只允许编排器在 tasknest/ 临时分支上调用：先校验分支，再执行 reset --hard 与 clean -fd。
      */
     public void discardWorkingTree(Path root, String expectedBranch) {
         ensureBranch(root, expectedBranch);
@@ -211,6 +231,7 @@ public class GitService {
         run(root, "clean", "-fd");
     }
 
+    /** 返回 fromRef 到 toRef 之间变更的文件路径；命令失败时返回空列表。 */
     public List<String> changedFiles(Path root, String fromRef, String toRef) {
         ExecResult result = run(root, "diff", "--name-only", fromRef, toRef);
         if (result.exitCode() != 0) {
@@ -235,6 +256,7 @@ public class GitService {
     }
 
     private ExecResult runWithIdentity(Path root, String... args) {
+        // 统一注入内置身份并关闭 GPG 签名，避免宿主机缺少 user.name 或签名提示阻塞自动化提交/合并。
         List<String> command = new ArrayList<>();
         command.add("git");
         command.add("-C");
@@ -300,6 +322,7 @@ public class GitService {
         return thread;
     }
 
+    /** 一次 git 命令的退出码与原始输出。 */
     private record ExecResult(int exitCode, String stdout, String stderr) {
         String stderrSummary() {
             String value = stderr == null ? "" : stderr.trim();

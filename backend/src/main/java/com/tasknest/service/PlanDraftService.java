@@ -3,17 +3,11 @@ package com.tasknest.service;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.tasknest.api.dto.PlanDraftInput;
 import com.tasknest.api.dto.PlanDraftView;
 import com.tasknest.api.dto.PlanRowView;
-import com.tasknest.api.dto.RevisePlanRequest;
 import com.tasknest.common.BusinessException;
 import com.tasknest.common.ErrorCode;
 import com.tasknest.event.EventPayload;
-import com.tasknest.event.EventType;
-import com.tasknest.orchestrator.MockEvent;
-import com.tasknest.orchestrator.MockScript;
-import com.tasknest.orchestrator.MockScriptLoader;
 import com.tasknest.persistence.entity.MainTaskEntity;
 import com.tasknest.persistence.entity.MainTaskPlanEntity;
 import com.tasknest.persistence.service.MainTaskEntityService;
@@ -35,10 +29,10 @@ import java.util.Set;
 import java.util.StringJoiner;
 
 /**
- * 计划表生成、提示词修订与持久化。
+ * 计划表渲染、修订与持久化。
  *
- * <p>P3 的规划会话由真实模型生成计划；本类负责兼容入口的确定性草案生成、计划表
- * Markdown 渲染与持久化，并允许用自然语言提示做增删步骤。</p>
+ * <p>计划内容来自真实规划 Agent 的确认稿；本类负责把两层任务渲染为 Markdown、
+ * 保存 / 读取一对一计划档案，并支持运行期动态重排与档案保存后的提示词修订。</p>
  */
 @Service
 public class PlanDraftService {
@@ -50,48 +44,25 @@ public class PlanDraftService {
     };
     private static final int MAX_INSTRUCTION_PREVIEW = 18;
 
-    private final MockScriptLoader scriptLoader;
     private final MainTaskPlanEntityService planService;
     private final MainTaskEntityService mainTaskService;
     private final ObjectMapper objectMapper;
 
-    public PlanDraftService(MockScriptLoader scriptLoader,
-                            MainTaskPlanEntityService planService,
+    public PlanDraftService(MainTaskPlanEntityService planService,
                             MainTaskEntityService mainTaskService,
                             ObjectMapper objectMapper) {
-        this.scriptLoader = scriptLoader;
         this.planService = planService;
         this.mainTaskService = mainTaskService;
         this.objectMapper = objectMapper;
     }
 
-    public PlanDraftView generate(String mockScript, String goal) {
-        assertAllowed(mockScript);
-        MockScript script = scriptLoader.load(mockScript);
-        EventPayload.Plan plan = extractPlan(script);
-        EventPayload.PlannedTask root = rootOf(plan);
-        String effectiveGoal = resolveGoal(script, goal);
-        List<PlanRowView> rows = rowsFrom(plan, root);
-        return buildDraft(null, root.title(), effectiveGoal, mockScript, rows, List.of());
-    }
-
-    public PlanDraftView fromInput(String mockScript, String goal, PlanDraftInput input) {
-        assertAllowed(mockScript);
-        MockScript script = scriptLoader.load(mockScript);
-        String effectiveGoal = resolveGoal(script, goal);
-        List<String> revisions = input.revisions() == null ? List.of() : List.copyOf(input.revisions());
-        return buildDraft(null, input.title().trim(), effectiveGoal, mockScript,
-                List.copyOf(input.rows()), revisions);
-    }
-
-    /** 保存规划会话确认的计划。真实模型计划没有 mockScript。 */
-    public PlanDraftView fromConfirmed(String mockScript,
-                                       String goal,
+    /** 保存规划会话确认的计划。 */
+    public PlanDraftView fromConfirmed(String goal,
                                        String title,
                                        List<PlanRowView> rows,
                                        List<String> revisions,
                                        int revision) {
-        return buildDraft(null, title, goal, mockScript, rows, revisions, revision);
+        return buildDraft(null, title, goal, rows, revisions, revision);
     }
 
     /**
@@ -138,22 +109,16 @@ public class PlanDraftService {
         revisions.add("动态重排 revision " + revision + "："
                 + (reason == null || reason.isBlank() ? "主 Agent 调整计划" : reason));
         PlanDraftView next = buildDraft(mainTaskId, title, current.goal(),
-                current.mockScript(), rows, revisions, revision);
+                rows, revisions, revision);
         save(mainTaskId, next);
     }
 
-    public PlanDraftView revise(RevisePlanRequest request) {
-        assertAllowed(request.mockScript());
-        scriptLoader.load(request.mockScript());
-        return applyInstruction(
-                request.title(),
-                request.goal(),
-                request.rows(),
-                request.revisions(),
-                request.instruction(),
-                request.mockScript());
-    }
-
+    /**
+     * 新增或更新主任务的一对一计划档案。计划表与主任务分表保存，
+     * 因此已存在的库无需给 {@code tn_main_task} 补列。
+     *
+     * @return 回填 {@code mainTaskId} 的计划视图
+     */
     @Transactional
     public PlanDraftView save(String mainTaskId, PlanDraftView draft) {
         LocalDateTime now = LocalDateTime.now();
@@ -165,7 +130,6 @@ public class PlanDraftService {
         }
         entity.setPlanTitle(draft.title());
         entity.setPlanGoal(draft.goal());
-        entity.setPlanScript(draft.mockScript());
         entity.setPlanVersion(draft.version());
         entity.setPlanMarkdown(draft.markdown());
         entity.setPlanRows(writeJson(draft.rows()));
@@ -179,6 +143,9 @@ public class PlanDraftService {
         return draft.withMainTaskId(mainTaskId);
     }
 
+    /**
+     * 查询计划档案；没有计划时返回 {@code null}，由调用方决定是否视为错误。
+     */
     public PlanDraftView find(String mainTaskId) {
         MainTaskPlanEntity entity = findByMainTaskId(mainTaskId);
         return entity == null ? null : toView(entity);
@@ -203,17 +170,19 @@ public class PlanDraftService {
                 current.goal(),
                 current.rows(),
                 current.revisions(),
-                instruction,
-                current.mockScript());
+                instruction);
         return save(mainTaskId, revised);
     }
 
+    /**
+     * 修订规则完全由关键词决定（删 / 精简 / 风险复核 / 其他补充步骤），
+     * 不调用模型；每次修订追加一条修订记录并重算版本号。
+     */
     private PlanDraftView applyInstruction(String title,
                                            String goal,
                                            List<PlanRowView> rows,
                                            List<String> revisions,
-                                           String instruction,
-                                           String mockScript) {
+                                           String instruction) {
         String note = instruction == null ? "" : instruction.trim();
         if (note.isEmpty()) {
             throw new BusinessException(ErrorCode.INVALID_PARAM, "先输入一条修改提示");
@@ -247,23 +216,24 @@ public class PlanDraftService {
             summary = "按提示「" + note + "」增加补充步骤";
         }
         nextRevisions.add(summary);
-        return buildDraft(null, title, goal, mockScript, nextRows, nextRevisions);
+        return buildDraft(null, title, goal, nextRows, nextRevisions);
     }
 
+    /**
+     * 未显式给出修订号时，以“修订记录数 + 1”作为版本号，保证首次草案为 1。
+     */
     private PlanDraftView buildDraft(String mainTaskId,
                                      String title,
                                      String goal,
-                                     String mockScript,
                                      List<PlanRowView> rows,
                                      List<String> revisions) {
-        return buildDraft(mainTaskId, title, goal, mockScript, rows, revisions,
+        return buildDraft(mainTaskId, title, goal, rows, revisions,
                 revisions.size() + 1);
     }
 
     private PlanDraftView buildDraft(String mainTaskId,
                                      String title,
                                      String goal,
-                                     String mockScript,
                                      List<PlanRowView> rows,
                                      List<String> revisions,
                                      int revision) {
@@ -273,31 +243,11 @@ public class PlanDraftService {
                 mainTaskId,
                 title,
                 goal,
-                mockScript,
                 version,
                 markdown,
                 List.copyOf(rows),
                 List.copyOf(revisions),
                 version);
-    }
-
-    private List<PlanRowView> rowsFrom(EventPayload.Plan plan, EventPayload.PlannedTask root) {
-        List<EventPayload.PlannedTask> children = plan.tasks().stream()
-                .filter(task -> root.taskId().equals(task.parentTaskId()))
-                .toList();
-        Map<String, Integer> indexes = new LinkedHashMap<>();
-        for (int index = 0; index < children.size(); index++) {
-            indexes.put(children.get(index).taskId(), index + 1);
-        }
-        List<PlanRowView> rows = new ArrayList<>(children.size());
-        for (EventPayload.PlannedTask child : children) {
-            rows.add(new PlanRowView(
-                    child.title(),
-                    child.agentName(),
-                    dependencyOf(child.dependsOn(), indexes),
-                    outputOf(child.title())));
-        }
-        return rows;
     }
 
     private String dependencyOf(List<String> dependsOn, Map<String, Integer> indexes) {
@@ -321,25 +271,6 @@ public class PlanDraftService {
 
     private String dependencyOf(int previousRowCount) {
         return previousRowCount <= 0 ? "—" : "第 " + previousRowCount + " 步";
-    }
-
-    private String outputOf(String title) {
-        if (matches(title, "收集", "检索", "调研", "采集", "核对")) {
-            return "事实与来源";
-        }
-        if (matches(title, "风险", "复核", "审核", "检查")) {
-            return "复核结论";
-        }
-        if (matches(title, "撰写", "正文", "报告", "周报", "草稿")) {
-            return "初稿";
-        }
-        if (matches(title, "计划", "方案", "设计", "起草")) {
-            return "可执行方案";
-        }
-        if (matches(title, "汇总", "归类", "分析", "评估")) {
-            return "结论与清单";
-        }
-        return "可复核结果";
     }
 
     private String buildMarkdown(String title,
@@ -401,43 +332,6 @@ public class PlanDraftService {
         return false;
     }
 
-    private void assertAllowed(String mockScript) {
-        if (mockScript == null || !scriptLoader.isAllowed(mockScript)) {
-            throw new BusinessException(ErrorCode.INVALID_SCRIPT,
-                    "mockScript 必须是 " + String.join(" / ", scriptLoader.allowedScripts()));
-        }
-    }
-
-    private EventPayload.Plan extractPlan(MockScript script) {
-        for (MockEvent event : script.events()) {
-            if (event.type() == EventType.PLAN && event.payload() instanceof EventPayload.Plan plan) {
-                return plan;
-            }
-        }
-        throw new BusinessException(ErrorCode.INVALID_MOCK_SCRIPT, "脚本没有可用的 plan 事件");
-    }
-
-    private EventPayload.PlannedTask rootOf(EventPayload.Plan plan) {
-        return plan.tasks().stream()
-                .filter(task -> task.parentTaskId() == null)
-                .findFirst()
-                .orElseThrow(() -> new BusinessException(
-                        ErrorCode.INVALID_MOCK_SCRIPT, "脚本计划缺少主任务"));
-    }
-
-    private String resolveGoal(MockScript script, String goal) {
-        if (goal != null && !goal.isBlank()) {
-            return goal.trim();
-        }
-        for (MockEvent event : script.events()) {
-            if (event.type() == EventType.RUN_STARTED
-                    && event.payload() instanceof EventPayload.RunStarted started) {
-                return started.goal();
-            }
-        }
-        return "未填写目标";
-    }
-
     private MainTaskEntity findMain(String mainTaskId) {
         MainTaskEntity main = mainTaskService.getOne(
                 Wrappers.<MainTaskEntity>lambdaQuery()
@@ -458,7 +352,6 @@ public class PlanDraftService {
                 entity.getMainTaskId(),
                 entity.getPlanTitle(),
                 entity.getPlanGoal(),
-                entity.getPlanScript(),
                 entity.getPlanVersion() == null ? 1 : entity.getPlanVersion(),
                 entity.getPlanMarkdown(),
                 readJson(entity.getPlanRows(), ROWS, List.of()),
